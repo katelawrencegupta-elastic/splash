@@ -2,8 +2,12 @@
 
 # Buffer events and classify via POST /classify/batch.
 # script_params: classify_url, batch_size, flush_ms
-# Enable periodic_flush in logstash.conf so idle buffers flush without waiting
-# for another event.
+#
+# - Reuses one Net::HTTP keep-alive connection
+# - Takes batches under the buffer mutex; HTTP runs outside that lock
+# - A flusher thread wakes every flush_ms so idle buffers don't wait on
+#   Logstash's coarser periodic_flush schedule; results sit in @egress
+#   until filter/flush returns them into the pipeline
 
 def register(params)
   require "json"
@@ -16,9 +20,38 @@ def register(params)
   @batch_size = 100 if @batch_size < 1
   @flush_ms = (params["flush_ms"] || 200).to_i
   @flush_ms = 200 if @flush_ms < 1
+
   @buffer = []
   @batch_started_at = nil
-  @mutex = Mutex.new
+  @buffer_mutex = Mutex.new
+
+  @uri = URI.parse(@batch_url)
+  @http = Net::HTTP.new(@uri.host, @uri.port)
+  @http.open_timeout = 5
+  @http.read_timeout = 30
+  @http.keep_alive_timeout = 60
+  @http.start
+  @http_mutex = Mutex.new
+
+  @egress = []
+  @egress_mutex = Mutex.new
+  @stop = false
+  @flusher = Thread.new { flush_loop }
+end
+
+def close
+  @stop = true
+  begin
+    @flusher&.wakeup
+  rescue ThreadError
+    nil
+  end
+  @flusher&.join(2)
+  begin
+    @http.finish if @http&.started?
+  rescue StandardError
+    nil
+  end
 end
 
 def log_error(message)
@@ -30,23 +63,59 @@ rescue StandardError
 end
 
 def filter(event)
-  out = []
-  @mutex.synchronize do
+  tags = event.get("tags")
+  if tags.is_a?(Array) && tags.include?("_classify_tick")
+    event.cancel
+    return flush_aged_and_drain
+  end
+
+  batch = nil
+  @buffer_mutex.synchronize do
     @buffer << event.clone
     @batch_started_at ||= monotonic_ms
     event.cancel
-    out = flush_locked! if @buffer.length >= @batch_size || buffer_aged?
+    batch = take_batch_locked! if @buffer.length >= @batch_size || buffer_aged?
   end
+
+  out = []
+  out.concat(classify_events(batch)) if batch
+  out.concat(drain_egress)
   out
 end
 
-# Called by Logstash when periodic_flush => true
+# Called by Logstash when periodic_flush => true (safety net for idle egress)
 def flush(_options = {})
-  out = []
-  @mutex.synchronize do
-    out = flush_locked! if !@buffer.empty? && buffer_aged?
+  flush_aged_and_drain
+end
+
+def flush_aged_and_drain
+  batch = nil
+  @buffer_mutex.synchronize do
+    batch = take_batch_locked! if !@buffer.empty? && buffer_aged?
   end
+  out = []
+  out.concat(classify_events(batch)) if batch
+  out.concat(drain_egress)
   out
+end
+
+def flush_loop
+  interval = @flush_ms / 1000.0
+  until @stop
+    sleep(interval)
+    break if @stop
+
+    batch = nil
+    @buffer_mutex.synchronize do
+      batch = take_batch_locked! if !@buffer.empty? && (@buffer.length >= @batch_size || buffer_aged?)
+    end
+    next unless batch
+
+    finished = classify_events(batch)
+    @egress_mutex.synchronize { @egress.concat(finished) }
+  end
+rescue StandardError => e
+  log_error("classify_batch flusher died: #{e.class}: #{e.message}")
 end
 
 def monotonic_ms
@@ -61,12 +130,28 @@ def buffer_aged?
   (monotonic_ms - @batch_started_at) >= @flush_ms
 end
 
-def flush_locked!
-  return [] if @buffer.empty?
+# Caller must hold @buffer_mutex
+def take_batch_locked!
+  return nil if @buffer.empty?
 
   events = @buffer
   @buffer = []
   @batch_started_at = nil
+  events
+end
+
+def drain_egress
+  @egress_mutex.synchronize do
+    return [] if @egress.empty?
+
+    out = @egress
+    @egress = []
+    out
+  end
+end
+
+def classify_events(events)
+  return [] if events.nil? || events.empty?
 
   payloads = events.map do |e|
     {
@@ -85,14 +170,16 @@ def flush_locked!
 end
 
 def post_batch(payloads)
-  uri = URI.parse(@batch_url)
-  http = Net::HTTP.new(uri.host, uri.port)
-  http.open_timeout = 5
-  http.read_timeout = 30
-  req = Net::HTTP::Post.new(uri.request_uri)
+  req = Net::HTTP::Post.new(@uri.request_uri)
   req["Content-Type"] = "application/json"
+  req["Connection"] = "keep-alive"
   req.body = JSON.generate("events" => payloads)
-  resp = http.request(req)
+
+  resp = @http_mutex.synchronize do
+    ensure_http_started!
+    @http.request(req)
+  end
+
   unless resp.is_a?(Net::HTTPSuccess)
     log_error("classify_batch HTTP #{resp.code}: #{resp.body.to_s[0, 500]}")
     return Array.new(payloads.length) { fallback_result }
@@ -106,7 +193,31 @@ def post_batch(payloads)
   results
 rescue StandardError => e
   log_error("classify_batch failed: #{e.class}: #{e.message}")
+  begin
+    @http_mutex.synchronize { restart_http! }
+  rescue StandardError
+    nil
+  end
   Array.new(payloads.length) { fallback_result }
+end
+
+def ensure_http_started!
+  return if @http.started?
+
+  @http.start
+end
+
+def restart_http!
+  begin
+    @http.finish if @http.started?
+  rescue StandardError
+    nil
+  end
+  @http = Net::HTTP.new(@uri.host, @uri.port)
+  @http.open_timeout = 5
+  @http.read_timeout = 30
+  @http.keep_alive_timeout = 60
+  @http.start
 end
 
 def fallback_result

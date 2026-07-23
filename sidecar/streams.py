@@ -115,19 +115,17 @@ class DataStreamManager:
             self._template_ready = True
 
     def ensure_data_stream(self, name: str) -> None:
-        """Idempotently create data stream ``name`` (e.g. logs-access_log-default)."""
+        """Idempotently create data stream ``name`` (e.g. logs-access_log-default).
+
+        PUT-only: ``resource_already_exists_exception`` is treated as success, so
+        a prior GET is unnecessary.
+        """
         if name in self._ensured:
             return
         with self._lock:
             if name in self._ensured:
                 return
             self.ensure_template()
-            status, body = self._request("GET", f"/_data_stream/{name}")
-            if status == 200:
-                self._ensured.add(name)
-                logger.debug("Data stream already exists: %s", name)
-                return
-
             status, body = self._request("PUT", f"/_data_stream/{name}")
             if status in (200, 201):
                 self._ensured.add(name)
@@ -137,11 +135,7 @@ class DataStreamManager:
                 err_type = body.get("error", {}).get("type", "")
                 if err_type == "resource_already_exists_exception":
                     self._ensured.add(name)
-                    return
-                # Race: stream created between GET and PUT
-                get_status, _ = self._request("GET", f"/_data_stream/{name}")
-                if get_status == 200:
-                    self._ensured.add(name)
+                    logger.debug("Data stream already exists: %s", name)
                     return
             raise RuntimeError(
                 f"data stream create failed name={name} status={status} body={body}"

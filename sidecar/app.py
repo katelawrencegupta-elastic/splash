@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -25,7 +26,6 @@ ELASTIC_HOST = os.environ.get(
 ELASTIC_API_KEY = os.environ.get("ELASTIC_API_KEY", "")
 DATA_STREAM_NAMESPACE = os.environ.get("DATA_STREAM_NAMESPACE", "default")
 
-app = FastAPI(title="splash-classify", version="1.0.0")
 _manager: Optional[DataStreamManager] = None
 
 
@@ -36,6 +36,19 @@ def get_manager() -> DataStreamManager:
             raise HTTPException(status_code=500, detail="ELASTIC_API_KEY is not set")
         _manager = DataStreamManager(ELASTIC_HOST, ELASTIC_API_KEY)
     return _manager
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    yield
+    global _manager
+    if _manager is not None:
+        _manager.close()
+        _manager = None
+        logger.info("Closed DataStreamManager HTTP client")
+
+
+app = FastAPI(title="splash-classify", version="1.0.0", lifespan=lifespan)
 
 
 class ClassifyRequest(BaseModel):
