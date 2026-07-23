@@ -1,0 +1,39 @@
+services:
+  classify:
+    build: ./sidecar
+    container_name: splash-classify
+    environment:
+      ELASTIC_HOST: "https://klgsplashpoc-ba74ce.es.us-central1.gcp.elastic.cloud:443"
+      ELASTIC_API_KEY: "${ELASTIC_API_KEY}"
+      DATA_STREAM_NAMESPACE: "${DATA_STREAM_NAMESPACE:-default}"
+    expose:
+      - "8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  logstash:
+    build: ./logstash
+    container_name: splash-logstash
+    ports:
+      - "39997:39997"
+      - "39998:39998"
+    environment:
+      ELASTIC_HOST: "https://klgsplashpoc-ba74ce.es.us-central1.gcp.elastic.cloud:443"
+      ELASTIC_API_KEY: "${ELASTIC_API_KEY}"
+      CLASSIFY_URL: "http://classify:8080"
+      CLASSIFY_BATCH_SIZE: "${CLASSIFY_BATCH_SIZE:-100}"
+      CLASSIFY_FLUSH_MS: "${CLASSIFY_FLUSH_MS:-200}"
+      LS_JAVA_OPTS: "-Xms512m -Xmx512m"
+    volumes:
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./logstash/scripts:/usr/share/logstash/scripts:ro
+      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+    depends_on:
+      classify:
+        condition: service_healthy
+    restart: unless-stopped
