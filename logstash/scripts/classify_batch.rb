@@ -89,7 +89,10 @@ def filter(event)
 
   batch = nil
   @buffer_mutex.synchronize do
-    @buffer << event.clone
+    # Buffer the original event, then cancel it so it does not continue the
+    # pipeline. Cancelled events must not be returned later — we clear the
+    # flag when re-injecting (see rearm_event!).
+    @buffer << event
     @batch_started_at ||= monotonic_ms
     event.cancel
     batch = take_batch_locked! if @buffer.length >= @batch_size || buffer_aged?
@@ -193,6 +196,7 @@ def classify_events(events)
 
   results = post_batch(payloads)
   events.each_with_index do |e, i|
+    rearm_event!(e)
     apply_result(e, results[i])
   end
   events
@@ -256,8 +260,21 @@ def fallback_result
     "namespace" => "default",
     "data_stream" => "logs-generic-default",
     "pipeline_name" => "frosty-parse-generic",
-    "reason" => "fallback=batch_error"
+    "reason" => "fallback=batch_error",
+    "fallback" => true
   }
+end
+
+# Events buffered then cancelled must be rearmed before re-injection.
+def rearm_event!(event)
+  return unless event.respond_to?(:cancelled?) && event.cancelled?
+
+  if event.respond_to?(:uncancel)
+    event.uncancel
+  else
+    # Logstash::Event stores cancellation in @cancelled (no public uncancel).
+    event.instance_variable_set(:@cancelled, false)
+  end
 end
 
 def apply_result(event, result)
@@ -280,7 +297,9 @@ def apply_result(event, result)
   event.set("[splunk][pipeline]", result["pipeline_name"].to_s)
   event.set("[splunk][classify_reason]", result["reason"].to_s)
   event.set("[splunk][index]", event.get("splunk_index").to_s)
-  if result["reason"].to_s.include?("batch_error")
+
+  is_fallback = result["fallback"] == true || result["fallback"].to_s == "true"
+  if is_fallback
     tags = event.get("tags") || []
     tags = [tags] unless tags.is_a?(Array)
     tags << "_classify_failed" unless tags.include?("_classify_failed")

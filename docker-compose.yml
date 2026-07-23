@@ -3,8 +3,8 @@ services:
     build: ./sidecar
     container_name: splash-classify
     environment:
-      ELASTIC_HOST: "${ELASTIC_HOST}"
-      ELASTIC_API_KEY: "${ELASTIC_API_KEY}"
+      ELASTIC_HOST: "${ELASTIC_HOST:?ELASTIC_HOST is required}"
+      ELASTIC_API_KEY: "${ELASTIC_API_KEY:?ELASTIC_API_KEY is required}"
       DATA_STREAM_NAMESPACE: "${DATA_STREAM_NAMESPACE:-default}"
     expose:
       - "8080"
@@ -24,12 +24,13 @@ services:
     expose:
       - "39996"
     environment:
-      ELASTIC_HOST: "${ELASTIC_HOST}"
-      ELASTIC_API_KEY: "${ELASTIC_API_KEY}"
+      ELASTIC_HOST: "${ELASTIC_HOST:?ELASTIC_HOST is required}"
+      ELASTIC_API_KEY: "${ELASTIC_API_KEY:?ELASTIC_API_KEY is required}"
       CLASSIFY_URL: "http://classify:8080"
       CLASSIFY_BATCH_SIZE: "${CLASSIFY_BATCH_SIZE:-100}"
       CLASSIFY_FLUSH_MS: "${CLASSIFY_FLUSH_MS:-200}"
-      LS_JAVA_OPTS: "-Xms512m -Xmx512m"
+      # 512m is tight under batch classify + ES bulk; override via LS_JAVA_OPTS if needed.
+      LS_JAVA_OPTS: "${LS_JAVA_OPTS:--Xms1g -Xmx1g}"
     volumes:
       - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
       - ./logstash/scripts:/usr/share/logstash/scripts:ro
@@ -38,7 +39,14 @@ services:
       classify:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9600/_node/stats >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
 
+  # Owns cooked S2S on 39998 (mutually exclusive with logstash-input-s2s).
   s2s-decode:
     build: ./s2s
     container_name: splash-s2s-decode
@@ -58,7 +66,8 @@ services:
       S2S_UPSTREAM_DRAIN_TIMEOUT_S: "${S2S_UPSTREAM_DRAIN_TIMEOUT_S:-30}"
       LOG_LEVEL: "INFO"
     depends_on:
-      - logstash
+      logstash:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health')"]

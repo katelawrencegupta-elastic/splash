@@ -52,7 +52,11 @@ Splunk cooked tcpout :39998
 | S2S upstream: inflight retry, batching, backpressure | `s2s/server.py` |
 | S2S graceful drain on shutdown | `s2s/server.py` |
 | `_fill_batch` without per-item `wait_for` tasks | `s2s/server.py` |
-| Elasticsearch host from env only | `sidecar/app.py`, compose, `.env` |
+| Elasticsearch host from env only (fail-fast) | `sidecar/app.py`, compose |
+| Thread-safe `get_manager()` | `sidecar/app.py` |
+| Cooked S2S via `s2s-decode` only (no Logstash s2s plugin) | compose + Dockerfile |
+| Logstash healthcheck | `docker-compose.yml` |
+| Classify fallback via boolean flag | `app.py` + `classify_batch.rb` |
 
 ---
 

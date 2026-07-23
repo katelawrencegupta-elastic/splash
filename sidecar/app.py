@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Optional
 
@@ -19,32 +20,46 @@ logging.basicConfig(
 )
 logger = logging.getLogger("splash.classify")
 
-ELASTIC_HOST = os.environ.get("ELASTIC_HOST", "").rstrip("/")
-ELASTIC_API_KEY = os.environ.get("ELASTIC_API_KEY", "")
+# Required — no hardcoded cluster default (avoids silent wrong-cluster writes).
+ELASTIC_HOST = os.environ.get("ELASTIC_HOST", "").strip().rstrip("/")
+ELASTIC_API_KEY = os.environ.get("ELASTIC_API_KEY", "").strip()
 DATA_STREAM_NAMESPACE = os.environ.get("DATA_STREAM_NAMESPACE", "default")
 
 _manager: Optional[DataStreamManager] = None
+_manager_lock = threading.Lock()
 
 
 def get_manager() -> DataStreamManager:
+    """Return the process-wide DataStreamManager (safe under uvicorn threadpool)."""
     global _manager
-    if _manager is None:
-        if not ELASTIC_HOST:
-            raise HTTPException(status_code=500, detail="ELASTIC_HOST is not set")
-        if not ELASTIC_API_KEY:
-            raise HTTPException(status_code=500, detail="ELASTIC_API_KEY is not set")
-        _manager = DataStreamManager(ELASTIC_HOST, ELASTIC_API_KEY)
-    return _manager
+    if _manager is not None:
+        return _manager
+    with _manager_lock:
+        if _manager is None:
+            if not ELASTIC_HOST:
+                raise HTTPException(status_code=500, detail="ELASTIC_HOST is not set")
+            if not ELASTIC_API_KEY:
+                raise HTTPException(status_code=500, detail="ELASTIC_API_KEY is not set")
+            _manager = DataStreamManager(ELASTIC_HOST, ELASTIC_API_KEY)
+            logger.info("DataStreamManager initialized for %s", ELASTIC_HOST)
+        return _manager
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    if not ELASTIC_HOST:
+        raise RuntimeError("ELASTIC_HOST is required (set it in the environment)")
+    if not ELASTIC_API_KEY:
+        raise RuntimeError("ELASTIC_API_KEY is required (set it in the environment)")
+    # Eager init so misconfig fails at startup, not on first event.
+    get_manager()
     yield
     global _manager
-    if _manager is not None:
-        _manager.close()
-        _manager = None
-        logger.info("Closed DataStreamManager HTTP client")
+    with _manager_lock:
+        if _manager is not None:
+            _manager.close()
+            _manager = None
+            logger.info("Closed DataStreamManager HTTP client")
 
 
 app = FastAPI(title="splash-classify", version="1.0.0", lifespan=lifespan)
@@ -67,6 +82,7 @@ class ClassifyResponse(BaseModel):
     data_stream: str
     pipeline_name: str
     reason: str
+    fallback: bool = False
 
 
 class BatchClassifyRequest(BaseModel):
@@ -86,6 +102,7 @@ def _fallback_response(*, reason: str) -> ClassifyResponse:
         data_stream=f"logs-generic-{namespace}",
         pipeline_name="frosty-parse-generic",
         reason=reason,
+        fallback=True,
     )
 
 
@@ -105,6 +122,7 @@ def _classify_fields(req: ClassifyRequest) -> ClassifyResponse:
         data_stream=stream,
         pipeline_name=classified.pipeline_name,
         reason=classified.reason,
+        fallback=False,
     )
 
 
@@ -129,7 +147,7 @@ def _ensure_stream_or_fallback(result: ClassifyResponse) -> ClassifyResponse:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "elastic_host": ELASTIC_HOST}
 
 
 @app.post("/classify", response_model=ClassifyResponse)
