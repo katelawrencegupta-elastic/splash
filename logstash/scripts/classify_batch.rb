@@ -47,6 +47,24 @@ def close
     nil
   end
   @flusher&.join(2)
+
+  # Best-effort: classify anything still buffered. Logstash should already have
+  # called flush(final: true); this catches the rare close-without-final path.
+  leftover = nil
+  @buffer_mutex.synchronize do
+    leftover = take_batch_locked! unless @buffer.empty?
+  end
+  if leftover
+    finished = classify_events(leftover)
+    @egress_mutex.synchronize { @egress.concat(finished) }
+  end
+
+  dropped = 0
+  @egress_mutex.synchronize { dropped = @egress.length }
+  if dropped.positive?
+    log_error("classify_batch close: #{dropped} classified event(s) not re-injected (no final flush)")
+  end
+
   begin
     @http.finish if @http&.started?
   rescue StandardError
@@ -83,20 +101,31 @@ def filter(event)
   out
 end
 
-# Called by Logstash when periodic_flush => true (safety net for idle egress)
-def flush(_options = {})
-  flush_aged_and_drain
-end
+# Called by Logstash when periodic_flush => true, and with final=true on shutdown
+def flush(options = {})
+  final = false
+  if options.respond_to?(:[])
+    final = options[:final] || options["final"]
+  end
+  final = final == true || final.to_s == "true"
 
-def flush_aged_and_drain
   batch = nil
   @buffer_mutex.synchronize do
-    batch = take_batch_locked! if !@buffer.empty? && buffer_aged?
+    if final
+      batch = take_batch_locked! unless @buffer.empty?
+    elsif !@buffer.empty? && buffer_aged?
+      batch = take_batch_locked!
+    end
   end
+
   out = []
   out.concat(classify_events(batch)) if batch
   out.concat(drain_egress)
   out
+end
+
+def flush_aged_and_drain
+  flush({})
 end
 
 def flush_loop

@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 from typing import Optional
 
 from aiohttp import web
@@ -29,41 +28,89 @@ MAX_FRAME_SIZE = int(os.environ.get("S2S_MAX_FRAME_SIZE", str(DEFAULT_MAX_FRAME_
 UPSTREAM_QUEUE_SIZE = int(os.environ.get("S2S_UPSTREAM_QUEUE_SIZE", "10000"))
 UPSTREAM_BATCH_SIZE = int(os.environ.get("S2S_UPSTREAM_BATCH_SIZE", "100"))
 UPSTREAM_FLUSH_MS = int(os.environ.get("S2S_UPSTREAM_FLUSH_MS", "50"))
+UPSTREAM_DRAIN_TIMEOUT_S = float(os.environ.get("S2S_UPSTREAM_DRAIN_TIMEOUT_S", "30"))
+
+# Queue sentinel: stop accepting work and let the writer exit after drain.
+_SHUTDOWN = object()
 
 
 async def _fill_batch(
-    queue: asyncio.Queue[bytes],
+    queue: asyncio.Queue,
     first: bytes,
     *,
     batch_size: int,
     flush_ms: int,
-) -> list[bytes]:
-    """Collect up to batch_size items, waiting at most flush_ms for more."""
-    batch = [first]
-    if batch_size <= 1 or flush_ms <= 0:
-        # Opportunistic non-blocking fill when flush is disabled
-        while len(batch) < batch_size:
-            try:
-                batch.append(queue.get_nowait())
-            except asyncio.QueueEmpty:
-                break
+) -> list[bytes] | object:
+    """Collect up to batch_size items without per-item wait_for tasks.
+
+    Drains immediately available items, then sleeps once up to ``flush_ms`` and
+    drains again. Returns ``_SHUTDOWN`` if the shutdown sentinel is seen.
+    """
+    if first is _SHUTDOWN:
+        return _SHUTDOWN
+
+    batch: list[bytes] = [first]
+    if batch_size <= 1:
         return batch
 
-    deadline = time.monotonic() + (flush_ms / 1000.0)
     while len(batch) < batch_size:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
         try:
-            item = await asyncio.wait_for(queue.get(), timeout=remaining)
-        except asyncio.TimeoutError:
+            item = queue.get_nowait()
+        except asyncio.QueueEmpty:
             break
+        if item is _SHUTDOWN:
+            # Preserve sentinel for the writer loop; return what we have.
+            await queue.put(_SHUTDOWN)
+            return batch
+
+        batch.append(item)
+
+    if len(batch) >= batch_size or flush_ms <= 0:
+        return batch
+
+    await asyncio.sleep(flush_ms / 1000.0)
+
+    while len(batch) < batch_size:
+        try:
+            item = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        if item is _SHUTDOWN:
+            await queue.put(_SHUTDOWN)
+            return batch
         batch.append(item)
     return batch
 
 
+async def _write_batch(writer: asyncio.StreamWriter, batch: list[bytes]) -> None:
+    for line in batch:
+        writer.write(line)
+    await writer.drain()
+
+
+async def _close_upstream(
+    reader: Optional[asyncio.StreamReader],
+    writer: Optional[asyncio.StreamWriter],
+    peer_watch: Optional[asyncio.Task],
+) -> None:
+    if peer_watch is not None and not peer_watch.done():
+        peer_watch.cancel()
+        try:
+            await peer_watch
+        except asyncio.CancelledError:
+            pass
+    if writer is not None:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+    # reader shares the transport with writer; closing writer is enough.
+    _ = reader
+
+
 async def upstream_writer(
-    queue: asyncio.Queue[bytes],
+    queue: asyncio.Queue,
     *,
     batch_size: int = UPSTREAM_BATCH_SIZE,
     flush_ms: int = UPSTREAM_FLUSH_MS,
@@ -71,56 +118,82 @@ async def upstream_writer(
     """Maintain a persistent connection to Logstash and write batched NDJSON.
 
     Items already dequeued stay in ``inflight`` until ``drain()`` succeeds, so a
-    reconnect does not silently drop the current batch.
+    reconnect does not silently drop the current batch. A ``_SHUTDOWN`` sentinel
+    drains inflight then exits cleanly.
     """
     inflight: list[bytes] = []
     batch_size = max(1, batch_size)
 
     while True:
+        reader: Optional[asyncio.StreamReader] = None
         writer: Optional[asyncio.StreamWriter] = None
+        peer_watch: Optional[asyncio.Task] = None
         try:
-            _reader, writer = await asyncio.open_connection(
+            reader, writer = await asyncio.open_connection(
                 LOGSTASH_HOST, LOGSTASH_DECODED_PORT
+            )
+            # Detect Logstash closing the socket so we reconnect promptly.
+            peer_watch = asyncio.create_task(
+                reader.read(1), name="logstash-peer-watch"
             )
             logger.info(
                 "connected to Logstash %s:%s", LOGSTASH_HOST, LOGSTASH_DECODED_PORT
             )
             while True:
+                if peer_watch.done():
+                    raise ConnectionResetError("Logstash closed upstream connection")
+
                 if not inflight:
                     first = await queue.get()
-                    inflight = await _fill_batch(
+                    if first is _SHUTDOWN:
+                        return
+                    filled = await _fill_batch(
                         queue,
                         first,
                         batch_size=batch_size,
                         flush_ms=flush_ms,
                     )
+                    if filled is _SHUTDOWN:
+                        return
+                    inflight = filled  # type: ignore[assignment]
 
-                for line in inflight:
-                    writer.write(line)
-                await writer.drain()
+                await _write_batch(writer, inflight)
                 inflight = []
         except asyncio.CancelledError:
+            if writer is not None and inflight:
+                try:
+                    await _write_batch(writer, inflight)
+                    inflight = []
+                except Exception as exc:
+                    logger.warning(
+                        "final drain of %s in-flight line(s) failed: %s",
+                        len(inflight),
+                        exc,
+                    )
             raise
         except Exception as exc:
-            logger.warning(
-                "upstream writer error: %s; retrying %s in-flight line(s) after 1s",
-                exc,
-                len(inflight),
-            )
+            # Exiting on shutdown sentinel path uses return, not exception.
+            if inflight and isinstance(exc, ConnectionResetError):
+                logger.warning(
+                    "upstream writer error: %s; retrying %s in-flight line(s) after 1s",
+                    exc,
+                    len(inflight),
+                )
+            else:
+                logger.warning(
+                    "upstream writer error: %s; retrying %s in-flight line(s) after 1s",
+                    exc,
+                    len(inflight),
+                )
             await asyncio.sleep(1.0)
         finally:
-            if writer is not None:
-                try:
-                    writer.close()
-                    await writer.wait_closed()
-                except Exception:
-                    pass
+            await _close_upstream(reader, writer, peer_watch)
 
 
 async def handle_s2s_client(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
-    queue: asyncio.Queue[bytes],
+    queue: asyncio.Queue,
     stats: S2SStats,
 ) -> None:
     peer = writer.get_extra_info("peername")
@@ -182,7 +255,7 @@ async def handle_s2s_client(
 
 async def health(request: web.Request) -> web.Response:
     stats: S2SStats = request.app["stats"]
-    queue: asyncio.Queue[bytes] = request.app["upstream_queue"]
+    queue: asyncio.Queue = request.app["upstream_queue"]
     return web.json_response(
         {
             "status": "ok",
@@ -204,14 +277,15 @@ async def health(request: web.Request) -> web.Response:
 
 
 async def start_background(app: web.Application) -> None:
-    queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=UPSTREAM_QUEUE_SIZE)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=UPSTREAM_QUEUE_SIZE)
     stats = S2SStats()
     task = asyncio.create_task(
         upstream_writer(
             queue,
             batch_size=UPSTREAM_BATCH_SIZE,
             flush_ms=UPSTREAM_FLUSH_MS,
-        )
+        ),
+        name="upstream-writer",
     )
     app["upstream_queue"] = queue
     app["upstream_task"] = task
@@ -237,13 +311,34 @@ async def start_background(app: web.Application) -> None:
 
 
 async def stop_background(app: web.Application) -> None:
+    """Stop accepting clients, drain the upstream queue, then stop the writer."""
     server: asyncio.AbstractServer = app["s2s_server"]
     server.close()
     await server.wait_closed()
+    logger.info("S2S listener closed; draining upstream queue")
+
+    queue: asyncio.Queue = app["upstream_queue"]
     task: asyncio.Task = app["upstream_task"]
-    task.cancel()
     try:
-        await task
+        await asyncio.wait_for(queue.put(_SHUTDOWN), timeout=5.0)
+    except asyncio.TimeoutError:
+        logger.warning("could not enqueue shutdown sentinel; cancelling writer")
+        task.cancel()
+
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=UPSTREAM_DRAIN_TIMEOUT_S)
+        logger.info("upstream writer drained and exited")
+    except asyncio.TimeoutError:
+        logger.warning(
+            "upstream drain timed out after %ss with ~%s queued; cancelling",
+            UPSTREAM_DRAIN_TIMEOUT_S,
+            queue.qsize(),
+        )
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     except asyncio.CancelledError:
         pass
 

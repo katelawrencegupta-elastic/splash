@@ -3,7 +3,7 @@ services:
     build: ./sidecar
     container_name: splash-classify
     environment:
-      ELASTIC_HOST: "https://klgsplashpoc-ba74ce.es.us-central1.gcp.elastic.cloud:443"
+      ELASTIC_HOST: "${ELASTIC_HOST}"
       ELASTIC_API_KEY: "${ELASTIC_API_KEY}"
       DATA_STREAM_NAMESPACE: "${DATA_STREAM_NAMESPACE:-default}"
     expose:
@@ -24,7 +24,7 @@ services:
     expose:
       - "39996"
     environment:
-      ELASTIC_HOST: "https://klgsplashpoc-ba74ce.es.us-central1.gcp.elastic.cloud:443"
+      ELASTIC_HOST: "${ELASTIC_HOST}"
       ELASTIC_API_KEY: "${ELASTIC_API_KEY}"
       CLASSIFY_URL: "http://classify:8080"
       CLASSIFY_BATCH_SIZE: "${CLASSIFY_BATCH_SIZE:-100}"
@@ -55,6 +55,7 @@ services:
       S2S_UPSTREAM_QUEUE_SIZE: "${S2S_UPSTREAM_QUEUE_SIZE:-10000}"
       S2S_UPSTREAM_BATCH_SIZE: "${S2S_UPSTREAM_BATCH_SIZE:-100}"
       S2S_UPSTREAM_FLUSH_MS: "${S2S_UPSTREAM_FLUSH_MS:-50}"
+      S2S_UPSTREAM_DRAIN_TIMEOUT_S: "${S2S_UPSTREAM_DRAIN_TIMEOUT_S:-30}"
       LOG_LEVEL: "INFO"
     depends_on:
       - logstash
