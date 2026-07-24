@@ -145,6 +145,41 @@ def _ensure_stream_or_fallback(result: ClassifyResponse) -> ClassifyResponse:
         return fallback
 
 
+def _ensure_unique_streams(
+    results: list[ClassifyResponse],
+) -> list[ClassifyResponse]:
+    """Ensure each distinct data_stream once, then map failures to fallback."""
+    manager = get_manager()
+    unique = {r.data_stream for r in results}
+    ok: dict[str, bool] = {}
+    for stream in unique:
+        try:
+            manager.ensure_data_stream(stream)
+            ok[stream] = True
+        except Exception:
+            logger.exception("Failed to ensure data stream %s; falling back", stream)
+            ok[stream] = False
+
+    if all(ok.values()):
+        return results
+
+    fallback_stream = _fallback_response(reason="fallback=ensure_failed").data_stream
+    try:
+        manager.ensure_data_stream(fallback_stream)
+    except Exception:
+        logger.exception("Failed to ensure fallback stream %s", fallback_stream)
+
+    out: list[ClassifyResponse] = []
+    for result in results:
+        if ok.get(result.data_stream, False):
+            out.append(result)
+        else:
+            out.append(
+                _fallback_response(reason="fallback=ensure_failed:RuntimeError")
+            )
+    return out
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "elastic_host": ELASTIC_HOST}
@@ -167,13 +202,12 @@ def classify_batch(req: BatchClassifyRequest) -> BatchClassifyResponse:
     if len(req.events) > 2000:
         raise HTTPException(status_code=400, detail="batch too large (max 2000)")
 
-    results: list[ClassifyResponse] = []
+    classified: list[ClassifyResponse] = []
     for event in req.events:
         try:
-            result = _classify_fields(event)
+            classified.append(_classify_fields(event))
         except Exception:
             logger.exception("classify failed for one event in batch; isolating")
-            result = _fallback_response(reason="fallback=classify_error")
-        results.append(_ensure_stream_or_fallback(result))
+            classified.append(_fallback_response(reason="fallback=classify_error"))
 
-    return BatchClassifyResponse(results=results)
+    return BatchClassifyResponse(results=_ensure_unique_streams(classified))

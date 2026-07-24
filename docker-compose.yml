@@ -29,6 +29,9 @@ services:
       CLASSIFY_URL: "http://classify:8080"
       CLASSIFY_BATCH_SIZE: "${CLASSIFY_BATCH_SIZE:-100}"
       CLASSIFY_FLUSH_MS: "${CLASSIFY_FLUSH_MS:-200}"
+      CLASSIFY_MAX_BUFFER: "${CLASSIFY_MAX_BUFFER:-5000}"
+      CLASSIFY_MAX_EGRESS: "${CLASSIFY_MAX_EGRESS:-5000}"
+      CLASSIFY_MESSAGE_PREFIX_BYTES: "${CLASSIFY_MESSAGE_PREFIX_BYTES:-512}"
       # 512m is tight under batch classify + ES bulk; override via LS_JAVA_OPTS if needed.
       LS_JAVA_OPTS: "${LS_JAVA_OPTS:--Xms1g -Xmx1g}"
     volumes:

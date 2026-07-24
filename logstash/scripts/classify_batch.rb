@@ -1,10 +1,14 @@
 # frozen_string_literal: true
 
 # Buffer events and classify via POST /classify/batch.
-# script_params: classify_url, batch_size, flush_ms
+# script_params: classify_url, batch_size, flush_ms, max_buffer, max_egress,
+#                message_prefix_bytes
 #
 # - Reuses one Net::HTTP keep-alive connection
 # - Takes batches under the buffer mutex; HTTP runs outside that lock
+# - Bounded @buffer (filter workers block when full → TCP backpressure)
+# - Bounded @egress (flusher waits to push; workers drain on each filter call)
+# - Omits message when sourcetype/source present; otherwise sends a short prefix
 # - A flusher thread wakes every flush_ms so idle buffers don't wait on
 #   Logstash's coarser periodic_flush schedule; results sit in @egress
 #   until filter/flush returns them into the pipeline
@@ -12,6 +16,7 @@
 def register(params)
   require "json"
   require "net/http"
+  require "thread"
   require "uri"
 
   @classify_url = (params["classify_url"] || "http://classify:8080").to_s.sub(%r{/+$}, "")
@@ -20,10 +25,17 @@ def register(params)
   @batch_size = 100 if @batch_size < 1
   @flush_ms = (params["flush_ms"] || 200).to_i
   @flush_ms = 200 if @flush_ms < 1
+  @max_buffer = (params["max_buffer"] || 5000).to_i
+  @max_buffer = [@max_buffer, @batch_size].max
+  @max_egress = (params["max_egress"] || @max_buffer).to_i
+  @max_egress = [@max_egress, @batch_size].max
+  @message_prefix_bytes = (params["message_prefix_bytes"] || 512).to_i
+  @message_prefix_bytes = 512 if @message_prefix_bytes < 1
 
   @buffer = []
   @batch_started_at = nil
   @buffer_mutex = Mutex.new
+  @buffer_cv = ConditionVariable.new
 
   @uri = URI.parse(@batch_url)
   @http = Net::HTTP.new(@uri.host, @uri.port)
@@ -35,6 +47,7 @@ def register(params)
 
   @egress = []
   @egress_mutex = Mutex.new
+  @egress_cv = ConditionVariable.new
   @stop = false
   @flusher = Thread.new { flush_loop }
 end
@@ -46,6 +59,8 @@ def close
   rescue ThreadError
     nil
   end
+  @buffer_mutex.synchronize { @buffer_cv.broadcast }
+  @egress_mutex.synchronize { @egress_cv.broadcast }
   @flusher&.join(2)
 
   # Best-effort: classify anything still buffered. Logstash should already have
@@ -56,7 +71,7 @@ def close
   end
   if leftover
     finished = classify_events(leftover)
-    @egress_mutex.synchronize { @egress.concat(finished) }
+    push_egress(finished)
   end
 
   dropped = 0
@@ -88,14 +103,30 @@ def filter(event)
   end
 
   batch = nil
+  accepted = false
   @buffer_mutex.synchronize do
-    # Buffer the original event, then cancel it so it does not continue the
-    # pipeline. Cancelled events must not be returned later — we clear the
-    # flag when re-injecting (see rearm_event!).
-    @buffer << event
-    @batch_started_at ||= monotonic_ms
-    event.cancel
-    batch = take_batch_locked! if @buffer.length >= @batch_size || buffer_aged?
+    # Block only on @buffer depth. Flusher take_batch frees space and wakes us;
+    # do not wait on @egress here (that would deadlock when workers cannot drain).
+    while !@stop && @buffer.length >= @max_buffer
+      @buffer_cv.wait(@buffer_mutex, 0.05)
+    end
+
+    unless @stop
+      # Buffer the original event, then cancel it so it does not continue the
+      # pipeline. Cancelled events must not be returned later — we clear the
+      # flag when re-injecting (see rearm_event!).
+      @buffer << event
+      @batch_started_at ||= monotonic_ms
+      event.cancel
+      accepted = true
+      batch = take_batch_locked! if @buffer.length >= @batch_size || buffer_aged?
+    end
+  end
+
+  unless accepted
+    # Shutting down with a full buffer: fail closed rather than unbounded growth.
+    apply_result(event, fallback_result)
+    return [event]
   end
 
   out = []
@@ -144,7 +175,7 @@ def flush_loop
     next unless batch
 
     finished = classify_events(batch)
-    @egress_mutex.synchronize { @egress.concat(finished) }
+    push_egress(finished)
   end
 rescue StandardError => e
   log_error("classify_batch flusher died: #{e.class}: #{e.message}")
@@ -169,37 +200,63 @@ def take_batch_locked!
   events = @buffer
   @buffer = []
   @batch_started_at = nil
+  @buffer_cv.broadcast
   events
 end
 
+def push_egress(events)
+  return if events.nil? || events.empty?
+
+  @egress_mutex.synchronize do
+    while !@stop && (@egress.length + events.length) > @max_egress && !@egress.empty?
+      @egress_cv.wait(@egress_mutex, 0.05)
+    end
+    @egress.concat(events)
+  end
+end
+
 def drain_egress
+  out = []
   @egress_mutex.synchronize do
     return [] if @egress.empty?
 
     out = @egress
     @egress = []
-    out
+    @egress_cv.broadcast
   end
+  out
 end
 
 def classify_events(events)
   return [] if events.nil? || events.empty?
 
-  payloads = events.map do |e|
-    {
-      "sourcetype" => e.get("sourcetype").to_s,
-      "source" => e.get("source").to_s,
-      "message" => e.get("message").to_s,
-      "splunk_index" => e.get("splunk_index").to_s
-    }
-  end
-
+  payloads = events.map { |e| build_payload(e) }
   results = post_batch(payloads)
   events.each_with_index do |e, i|
     rearm_event!(e)
     apply_result(e, results[i])
   end
   events
+end
+
+# Skip full message when metadata can classify; otherwise send a short prefix.
+def build_payload(event)
+  sourcetype = event.get("sourcetype").to_s
+  source = event.get("source").to_s
+  payload = {
+    "sourcetype" => sourcetype,
+    "source" => source,
+    "splunk_index" => event.get("splunk_index").to_s
+  }
+  if sourcetype.empty? && source.empty?
+    message = event.get("message").to_s
+    payload["message"] = if message.bytesize > @message_prefix_bytes
+                            message.byteslice(0, @message_prefix_bytes)
+                          else
+                            message
+                          end
+  end
+  payload
 end
 
 def post_batch(payloads)
