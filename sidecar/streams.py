@@ -16,6 +16,15 @@ logger = logging.getLogger(__name__)
 _ES_TIMEOUT_S = float(os.environ.get("ELASTIC_HTTP_TIMEOUT_S", "2.0"))
 
 
+def _coalesce_wait_s(http_steps: int) -> float:
+    """How long a waiter may block for ``http_steps`` sequential ES calls + slack.
+
+    Stream ensure can run template PUT then stream PUT (2 steps). Waiters must
+    outlive that worst case or they spuriously fall back while the worker succeeds.
+    """
+    return http_steps * _ES_TIMEOUT_S + 1.0
+
+
 def _api_key_header(api_key: str) -> str:
     """Encode id:api_key for Authorization: ApiKey <base64>."""
     raw = api_key.strip()
@@ -125,7 +134,7 @@ class DataStreamManager:
 
         if not do_work:
             assert wait_event is not None
-            if not wait_event.wait(timeout=_ES_TIMEOUT_S + 1.0):
+            if not wait_event.wait(timeout=_coalesce_wait_s(1)):
                 raise RuntimeError("index template ensure timed out waiting")
             if not self._template_ready:
                 raise RuntimeError("index template ensure failed in another thread")
@@ -174,7 +183,8 @@ class DataStreamManager:
 
         if not do_work:
             assert wait_event is not None
-            if not wait_event.wait(timeout=_ES_TIMEOUT_S + 1.0):
+            # Worker may still be ensuring template (1×) then the stream (1×).
+            if not wait_event.wait(timeout=_coalesce_wait_s(2)):
                 raise RuntimeError(f"data stream ensure timed out waiting name={name}")
             if name not in self._ensured:
                 raise RuntimeError(f"data stream ensure failed in another thread name={name}")

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
+from pathlib import Path
+from typing import Any
 
 
 def strip_splunk_prefix(value: str) -> str:
@@ -22,24 +25,42 @@ class EventKind(str, Enum):
     GENERIC = "generic"
 
 
-ACCESS_SOURCETYPE_RE = re.compile(
-    r"(access|apache|nginx|iis|httpd|lb)",
-    re.IGNORECASE,
-)
-SYSLOG_SOURCETYPE_RE = re.compile(r"syslog", re.IGNORECASE)
-ACCESS_SOURCE_RE = re.compile(
-    r"(/var/log/(nginx|apache2?|httpd)|access\.log)",
-    re.IGNORECASE,
-)
-SYSLOG_SOURCE_RE = re.compile(r"/var/log/syslog", re.IGNORECASE)
+_RULES_PATH = Path(__file__).resolve().parent / "classify_rules.json"
 
-# Combined / nginx-plus access log line
+
+def load_classify_rules(path: Path | None = None) -> dict[str, Any]:
+    """Load shared metadata classify rules (Logstash uses the same JSON)."""
+    rules_path = path or _RULES_PATH
+    with rules_path.open(encoding="utf-8") as fh:
+        data = json.load(fh)
+    required = (
+        "access_sourcetype",
+        "syslog_sourcetype",
+        "access_source",
+        "syslog_source",
+        "pipeline_name_template",
+    )
+    missing = [k for k in required if k not in data]
+    if missing:
+        raise ValueError(f"classify_rules.json missing keys: {missing}")
+    return data
+
+
+_RULES = load_classify_rules()
+
+ACCESS_SOURCETYPE_RE = re.compile(_RULES["access_sourcetype"], re.IGNORECASE)
+SYSLOG_SOURCETYPE_RE = re.compile(_RULES["syslog_sourcetype"], re.IGNORECASE)
+ACCESS_SOURCE_RE = re.compile(_RULES["access_source"], re.IGNORECASE)
+SYSLOG_SOURCE_RE = re.compile(_RULES["syslog_source"], re.IGNORECASE)
+_PIPELINE_TEMPLATE = str(_RULES["pipeline_name_template"])
+
+# Combined / nginx-plus access log line (sidecar message-path only)
 ACCESS_MESSAGE_RE = re.compile(
     r"^\S+\s+\S+\s+\S+\s+\[[^\]]+\]\s+\""
     r"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH|CONNECT|TRACE)\s",
     re.IGNORECASE,
 )
-# RFC3164 syslog with priority prefix
+# RFC3164 syslog with priority prefix (sidecar message-path only)
 SYSLOG_MESSAGE_RE = re.compile(
     r"^<\d+>[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\S+",
 )
@@ -54,7 +75,8 @@ class ClassifiedEvent:
 
 
 def parser_pipeline_name(kind: EventKind) -> str:
-    return f"frosty-parse-{kind.value.replace('_', '-')}"
+    kind_slug = kind.value.replace("_", "-")
+    return _PIPELINE_TEMPLATE.replace("{kind}", kind_slug)
 
 
 def _build(kind: EventKind, reason: str, splunk_index: str) -> ClassifiedEvent:

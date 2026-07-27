@@ -1,26 +1,23 @@
 # frozen_string_literal: true
 
-# Buffer events and classify via POST /classify/batch.
-# script_params: classify_url, batch_size, flush_ms, max_buffer, max_egress,
-#                message_prefix_bytes
+# Hybrid classify filter:
+# - Metadata hit (sourcetype/source rules from classify_rules.json): classify locally.
+#   First time a data_stream is seen → sync POST /ensure/batch; then cache in @ensured.
+# - Metadata miss → buffer and POST /classify/batch (message-pattern / generic path).
 #
-# - Reuses one Net::HTTP keep-alive connection
-# - Takes batches under the buffer mutex; HTTP runs outside that lock
-# - Bounded @buffer (filter workers block when full → TCP backpressure)
-# - Bounded @egress (flusher waits to push; workers drain on each filter call)
-# - Omits message when sourcetype/source present; otherwise sends a short prefix
-# - A flusher thread wakes every flush_ms so idle buffers don't wait on
-#   Logstash's coarser periodic_flush schedule; results sit in @egress
-#   until filter/flush returns them into the pipeline
+# script_params: classify_url, batch_size, flush_ms, max_buffer, max_egress,
+#                message_prefix_bytes, data_stream_namespace, rules_path
 
 def register(params)
   require "json"
   require "net/http"
+  require "set"
   require "thread"
   require "uri"
 
   @classify_url = (params["classify_url"] || "http://classify:8080").to_s.sub(%r{/+$}, "")
   @batch_url = "#{@classify_url}/classify/batch"
+  @ensure_url = "#{@classify_url}/ensure/batch"
   @batch_size = (params["batch_size"] || 100).to_i
   @batch_size = 100 if @batch_size < 1
   @flush_ms = (params["flush_ms"] || 200).to_i
@@ -31,25 +28,45 @@ def register(params)
   @max_egress = [@max_egress, @batch_size].max
   @message_prefix_bytes = (params["message_prefix_bytes"] || 512).to_i
   @message_prefix_bytes = 512 if @message_prefix_bytes < 1
+  @namespace = (params["data_stream_namespace"] || "default").to_s
+  @namespace = "default" if @namespace.empty?
+  @rules_path = (params["rules_path"] || "/usr/share/logstash/scripts/classify_rules.json").to_s
+
+  load_metadata_rules!(@rules_path)
 
   @buffer = []
   @batch_started_at = nil
   @buffer_mutex = Mutex.new
   @buffer_cv = ConditionVariable.new
 
-  @uri = URI.parse(@batch_url)
-  @http = Net::HTTP.new(@uri.host, @uri.port)
+  @batch_uri = URI.parse(@batch_url)
+  @ensure_uri = URI.parse(@ensure_url)
+  @http = Net::HTTP.new(@batch_uri.host, @batch_uri.port)
   @http.open_timeout = 5
   @http.read_timeout = 30
   @http.keep_alive_timeout = 60
   @http.start
   @http_mutex = Mutex.new
 
+  @ensured = Set.new
+  @ensured_mutex = Mutex.new
+
   @egress = []
   @egress_mutex = Mutex.new
   @egress_cv = ConditionVariable.new
   @stop = false
   @flusher = Thread.new { flush_loop }
+end
+
+def load_metadata_rules!(path)
+  raw = JSON.parse(File.read(path))
+  @access_sourcetype_re = Regexp.new(raw.fetch("access_sourcetype"), Regexp::IGNORECASE)
+  @syslog_sourcetype_re = Regexp.new(raw.fetch("syslog_sourcetype"), Regexp::IGNORECASE)
+  @access_source_re = Regexp.new(raw.fetch("access_source"), Regexp::IGNORECASE)
+  @syslog_source_re = Regexp.new(raw.fetch("syslog_source"), Regexp::IGNORECASE)
+  @pipeline_template = raw.fetch("pipeline_name_template").to_s
+rescue StandardError => e
+  raise "classify_batch failed to load rules from #{path}: #{e.class}: #{e.message}"
 end
 
 def close
@@ -63,15 +80,14 @@ def close
   @egress_mutex.synchronize { @egress_cv.broadcast }
   @flusher&.join(2)
 
-  # Best-effort: classify anything still buffered. Logstash should already have
-  # called flush(final: true); this catches the rare close-without-final path.
-  leftover = nil
-  @buffer_mutex.synchronize do
-    leftover = take_batch_locked! unless @buffer.empty?
-  end
-  if leftover
-    finished = classify_events(leftover)
-    push_egress(finished)
+  loop do
+    leftover = nil
+    @buffer_mutex.synchronize do
+      leftover = take_batch_locked! unless @buffer.empty?
+    end
+    break unless leftover
+
+    push_egress(classify_events(leftover))
   end
 
   dropped = 0
@@ -102,19 +118,22 @@ def filter(event)
     return flush_aged_and_drain
   end
 
+  local = classify_from_metadata(event)
+  if local
+    apply_local_hit!(event, local)
+    out = [event]
+    out.concat(drain_egress)
+    return out
+  end
+
   batch = nil
   accepted = false
   @buffer_mutex.synchronize do
-    # Block only on @buffer depth. Flusher take_batch frees space and wakes us;
-    # do not wait on @egress here (that would deadlock when workers cannot drain).
     while !@stop && @buffer.length >= @max_buffer
       @buffer_cv.wait(@buffer_mutex, 0.05)
     end
 
     unless @stop
-      # Buffer the original event, then cancel it so it does not continue the
-      # pipeline. Cancelled events must not be returned later — we clear the
-      # flag when re-injecting (see rearm_event!).
       @buffer << event
       @batch_started_at ||= monotonic_ms
       event.cancel
@@ -124,7 +143,6 @@ def filter(event)
   end
 
   unless accepted
-    # Shutting down with a full buffer: fail closed rather than unbounded growth.
     apply_result(event, fallback_result)
     return [event]
   end
@@ -135,7 +153,6 @@ def filter(event)
   out
 end
 
-# Called by Logstash when periodic_flush => true, and with final=true on shutdown
 def flush(options = {})
   final = false
   if options.respond_to?(:[])
@@ -143,17 +160,24 @@ def flush(options = {})
   end
   final = final == true || final.to_s == "true"
 
-  batch = nil
-  @buffer_mutex.synchronize do
-    if final
-      batch = take_batch_locked! unless @buffer.empty?
-    elsif !@buffer.empty? && buffer_aged?
-      batch = take_batch_locked!
-    end
-  end
-
   out = []
-  out.concat(classify_events(batch)) if batch
+  if final
+    loop do
+      batch = nil
+      @buffer_mutex.synchronize do
+        batch = take_batch_locked! unless @buffer.empty?
+      end
+      break unless batch
+
+      out.concat(classify_events(batch))
+    end
+  else
+    batch = nil
+    @buffer_mutex.synchronize do
+      batch = take_batch_locked! if !@buffer.empty? && buffer_aged?
+    end
+    out.concat(classify_events(batch)) if batch
+  end
   out.concat(drain_egress)
   out
 end
@@ -193,13 +217,16 @@ def buffer_aged?
   (monotonic_ms - @batch_started_at) >= @flush_ms
 end
 
-# Caller must hold @buffer_mutex
 def take_batch_locked!
   return nil if @buffer.empty?
 
-  events = @buffer
-  @buffer = []
-  @batch_started_at = nil
+  if @buffer.length <= @batch_size
+    events = @buffer
+    @buffer = []
+    @batch_started_at = nil
+  else
+    events = @buffer.shift(@batch_size)
+  end
   @buffer_cv.broadcast
   events
 end
@@ -227,19 +254,110 @@ def drain_egress
   out
 end
 
+def strip_splunk_prefix(value)
+  s = value.to_s
+  %w[host:: source:: sourcetype::].each do |prefix|
+    return s[prefix.length..] if s.start_with?(prefix)
+  end
+  s
+end
+
+def pipeline_name_for(kind)
+  @pipeline_template.gsub("{kind}", kind.to_s.tr("_", "-"))
+end
+
+# Returns a result hash or nil when message-path classify is required.
+def classify_from_metadata(event)
+  sourcetype = strip_splunk_prefix(event.get("sourcetype")).downcase
+  source = strip_splunk_prefix(event.get("source")).downcase
+  index = event.get("splunk_index").to_s.strip
+
+  kind = nil
+  reason = nil
+  if !sourcetype.empty? && sourcetype.match?(@access_sourcetype_re)
+    kind = "access_log"
+    reason = "sourcetype=#{sourcetype.inspect}"
+  elsif !sourcetype.empty? && sourcetype.match?(@syslog_sourcetype_re)
+    kind = "syslog"
+    reason = "sourcetype=#{sourcetype.inspect}"
+  elsif !source.empty? && source.match?(@access_source_re)
+    kind = "access_log"
+    reason = "source=#{source.inspect}"
+  elsif !source.empty? && source.match?(@syslog_source_re)
+    kind = "syslog"
+    reason = "source=#{source.inspect}"
+  else
+    return nil
+  end
+
+  dataset = index.empty? ? kind : "#{index}.#{kind}"
+  {
+    "kind" => kind,
+    "dataset" => dataset,
+    "namespace" => @namespace,
+    "data_stream" => "logs-#{dataset}-#{@namespace}",
+    "pipeline_name" => pipeline_name_for(kind),
+    "reason" => reason,
+    "fallback" => false
+  }
+end
+
+def stream_ensured?(name)
+  @ensured_mutex.synchronize { @ensured.include?(name) }
+end
+
+def mark_ensured!(name)
+  return if name.nil? || name.empty?
+
+  @ensured_mutex.synchronize { @ensured.add(name) }
+end
+
+def apply_local_hit!(event, result)
+  stream = result["data_stream"].to_s
+  if stream_ensured?(stream)
+    apply_result(event, result)
+    return
+  end
+
+  ensure_result = post_ensure([stream]).first
+  if ensure_result && (ensure_result["ok"] == true || ensure_result["ok"].to_s == "true")
+    resolved = ensure_result["resolved_stream"].to_s
+    resolved = stream if resolved.empty?
+    mark_ensured!(resolved)
+    apply_result(event, result.merge("data_stream" => resolved))
+  else
+    resolved = if ensure_result
+                 ensure_result["resolved_stream"].to_s
+               else
+                 ""
+               end
+    resolved = "logs-generic-#{@namespace}" if resolved.empty?
+    mark_ensured!(resolved)
+    apply_result(
+      event,
+      fallback_result.merge(
+        "data_stream" => resolved,
+        "namespace" => @namespace,
+        "reason" => "fallback=ensure_failed"
+      )
+    )
+  end
+end
+
 def classify_events(events)
   return [] if events.nil? || events.empty?
 
   payloads = events.map { |e| build_payload(e) }
-  results = post_batch(payloads)
+  results = post_classify_batch(payloads)
   events.each_with_index do |e, i|
     rearm_event!(e)
     apply_result(e, results[i])
+    stream = e.get("[@metadata][target_stream]").to_s
+    mark_ensured!(stream) unless stream.empty?
   end
   events
 end
 
-# Skip full message when metadata can classify; otherwise send a short prefix.
 def build_payload(event)
   sourcetype = event.get("sourcetype").to_s
   source = event.get("source").to_s
@@ -248,19 +366,18 @@ def build_payload(event)
     "source" => source,
     "splunk_index" => event.get("splunk_index").to_s
   }
-  if sourcetype.empty? && source.empty?
-    message = event.get("message").to_s
-    payload["message"] = if message.bytesize > @message_prefix_bytes
-                            message.byteslice(0, @message_prefix_bytes)
-                          else
-                            message
-                          end
-  end
+  # Metadata miss path: always send a short message prefix for pattern classify.
+  message = event.get("message").to_s
+  payload["message"] = if message.bytesize > @message_prefix_bytes
+                          message.byteslice(0, @message_prefix_bytes)
+                        else
+                          message
+                        end
   payload
 end
 
-def post_batch(payloads)
-  req = Net::HTTP::Post.new(@uri.request_uri)
+def post_classify_batch(payloads)
+  req = Net::HTTP::Post.new(@batch_uri.request_uri)
   req["Content-Type"] = "application/json"
   req["Connection"] = "keep-alive"
   req.body = JSON.generate("events" => payloads)
@@ -291,6 +408,50 @@ rescue StandardError => e
   Array.new(payloads.length) { fallback_result }
 end
 
+def post_ensure(streams)
+  req = Net::HTTP::Post.new(@ensure_uri.request_uri)
+  req["Content-Type"] = "application/json"
+  req["Connection"] = "keep-alive"
+  req.body = JSON.generate("streams" => streams)
+
+  resp = @http_mutex.synchronize do
+    ensure_http_started!
+    @http.request(req)
+  end
+
+  unless resp.is_a?(Net::HTTPSuccess)
+    log_error("ensure_batch HTTP #{resp.code}: #{resp.body.to_s[0, 500]}")
+    return streams.map do |s|
+      {
+        "data_stream" => s,
+        "ok" => false,
+        "fallback" => true,
+        "resolved_stream" => "logs-generic-#{@namespace}"
+      }
+    end
+  end
+  parsed = JSON.parse(resp.body)
+  results = parsed["results"]
+  return [] unless results.is_a?(Array)
+
+  results
+rescue StandardError => e
+  log_error("ensure_batch failed: #{e.class}: #{e.message}")
+  begin
+    @http_mutex.synchronize { restart_http! }
+  rescue StandardError
+    nil
+  end
+  streams.map do |s|
+    {
+      "data_stream" => s,
+      "ok" => false,
+      "fallback" => true,
+      "resolved_stream" => "logs-generic-#{@namespace}"
+    }
+  end
+end
+
 def ensure_http_started!
   return if @http.started?
 
@@ -303,7 +464,7 @@ def restart_http!
   rescue StandardError
     nil
   end
-  @http = Net::HTTP.new(@uri.host, @uri.port)
+  @http = Net::HTTP.new(@batch_uri.host, @batch_uri.port)
   @http.open_timeout = 5
   @http.read_timeout = 30
   @http.keep_alive_timeout = 60
@@ -314,22 +475,20 @@ def fallback_result
   {
     "kind" => "generic",
     "dataset" => "generic",
-    "namespace" => "default",
-    "data_stream" => "logs-generic-default",
-    "pipeline_name" => "frosty-parse-generic",
+    "namespace" => @namespace,
+    "data_stream" => "logs-generic-#{@namespace}",
+    "pipeline_name" => pipeline_name_for("generic"),
     "reason" => "fallback=batch_error",
     "fallback" => true
   }
 end
 
-# Events buffered then cancelled must be rearmed before re-injection.
 def rearm_event!(event)
   return unless event.respond_to?(:cancelled?) && event.cancelled?
 
   if event.respond_to?(:uncancel)
     event.uncancel
   else
-    # Logstash::Event stores cancellation in @cancelled (no public uncancel).
     event.instance_variable_set(:@cancelled, false)
   end
 end
@@ -337,13 +496,13 @@ end
 def apply_result(event, result)
   result = fallback_result if result.nil? || !result.is_a?(Hash)
   stream = result["data_stream"].to_s
-  stream = "logs-generic-default" if stream.empty?
+  stream = "logs-generic-#{@namespace}" if stream.empty?
   kind = result["kind"].to_s
   kind = "generic" if kind.empty?
   dataset = result["dataset"].to_s
   dataset = "generic" if dataset.empty?
   namespace = result["namespace"].to_s
-  namespace = "default" if namespace.empty?
+  namespace = @namespace if namespace.empty?
 
   event.set("[@metadata][target_stream]", stream)
   event.set("[event][kind]", kind)

@@ -51,8 +51,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError("ELASTIC_HOST is required (set it in the environment)")
     if not ELASTIC_API_KEY:
         raise RuntimeError("ELASTIC_API_KEY is required (set it in the environment)")
-    # Eager init so misconfig fails at startup, not on first event.
-    get_manager()
+    # Eager init + warm index template so first ensure is stream-only.
+    manager = get_manager()
+    try:
+        manager.ensure_template()
+    except Exception:
+        logger.exception("Failed to ensure index template at startup; will retry on demand")
     yield
     global _manager
     with _manager_lock:
@@ -93,6 +97,21 @@ class BatchClassifyResponse(BaseModel):
     results: list[ClassifyResponse]
 
 
+class EnsureBatchRequest(BaseModel):
+    streams: list[str]
+
+
+class EnsureStreamResult(BaseModel):
+    data_stream: str
+    ok: bool
+    fallback: bool = False
+    resolved_stream: str
+
+
+class EnsureBatchResponse(BaseModel):
+    results: list[EnsureStreamResult]
+
+
 def _fallback_response(*, reason: str) -> ClassifyResponse:
     namespace = DATA_STREAM_NAMESPACE or "default"
     return ClassifyResponse(
@@ -104,6 +123,11 @@ def _fallback_response(*, reason: str) -> ClassifyResponse:
         reason=reason,
         fallback=True,
     )
+
+
+def _fallback_stream_name() -> str:
+    namespace = DATA_STREAM_NAMESPACE or "default"
+    return f"logs-generic-{namespace}"
 
 
 def _classify_fields(req: ClassifyRequest) -> ClassifyResponse:
@@ -163,7 +187,7 @@ def _ensure_unique_streams(
     if all(ok.values()):
         return results
 
-    fallback_stream = _fallback_response(reason="fallback=ensure_failed").data_stream
+    fallback_stream = _fallback_stream_name()
     try:
         manager.ensure_data_stream(fallback_stream)
     except Exception:
@@ -178,6 +202,59 @@ def _ensure_unique_streams(
                 _fallback_response(reason="fallback=ensure_failed:RuntimeError")
             )
     return out
+
+
+def _ensure_streams_batch(streams: list[str]) -> list[EnsureStreamResult]:
+    """Ensure each distinct stream once; failures resolve to the generic fallback."""
+    manager = get_manager()
+    # Preserve request order of first occurrence; dedupe work.
+    ordered_unique: list[str] = []
+    seen: set[str] = set()
+    for name in streams:
+        stream = (name or "").strip()
+        if not stream or stream in seen:
+            continue
+        seen.add(stream)
+        ordered_unique.append(stream)
+
+    ok: dict[str, bool] = {}
+    for stream in ordered_unique:
+        try:
+            manager.ensure_data_stream(stream)
+            ok[stream] = True
+        except Exception:
+            logger.exception("Failed to ensure data stream %s; falling back", stream)
+            ok[stream] = False
+
+    if not all(ok.values()):
+        fallback = _fallback_stream_name()
+        try:
+            manager.ensure_data_stream(fallback)
+        except Exception:
+            logger.exception("Failed to ensure fallback stream %s", fallback)
+
+    fallback_name = _fallback_stream_name()
+    results: list[EnsureStreamResult] = []
+    for stream in ordered_unique:
+        if ok.get(stream, False):
+            results.append(
+                EnsureStreamResult(
+                    data_stream=stream,
+                    ok=True,
+                    fallback=False,
+                    resolved_stream=stream,
+                )
+            )
+        else:
+            results.append(
+                EnsureStreamResult(
+                    data_stream=stream,
+                    ok=False,
+                    fallback=True,
+                    resolved_stream=fallback_name,
+                )
+            )
+    return results
 
 
 @app.get("/health")
@@ -211,3 +288,12 @@ def classify_batch(req: BatchClassifyRequest) -> BatchClassifyResponse:
             classified.append(_fallback_response(reason="fallback=classify_error"))
 
     return BatchClassifyResponse(results=_ensure_unique_streams(classified))
+
+
+@app.post("/ensure/batch", response_model=EnsureBatchResponse)
+def ensure_batch(req: EnsureBatchRequest) -> EnsureBatchResponse:
+    if not req.streams:
+        return EnsureBatchResponse(results=[])
+    if len(req.streams) > 2000:
+        raise HTTPException(status_code=400, detail="batch too large (max 2000)")
+    return EnsureBatchResponse(results=_ensure_streams_batch(req.streams))

@@ -11,24 +11,33 @@ Splunk cooked tcpout :39998
         │                               ▼
         └──────────► Logstash :39996 / :39997
                             │
-                            ▼
-              classify_batch.rb (bounded buffer + batch HTTP)
-                            │
-                            ▼
-              splash-classify :8080
-              (metadata cache + ECS stream ensure)
-                            │
-                            ▼
-                    Elasticsearch Cloud
-                    logs-{dataset}-{namespace}
+              classify_batch.rb (hybrid)
+                 │                    │
+     metadata hit              metadata miss
+                 │                    │
+     local classify          POST /classify/batch
+     + /ensure/batch               (message path)
+     only if stream new               │
+                 │                    │
+                 └────────┬───────────┘
+                          ▼
+                 splash-classify :8080
+                 (policy + ES stream ensure)
+                          │
+                          ▼
+                 Elasticsearch Cloud
+                 logs-{dataset}-{namespace}
 ```
 
 **Data flow (cooked):**
 1. Splunk sends cooked S2S to `s2s-decode:39998`
 2. Decoder emits NDJSON to Logstash `:39996` (batched upstream writes)
-3. Logstash buffers events (bounded) and POSTs `/classify/batch` (message omitted when metadata present)
-4. Classify sidecar returns ECS fields + ensures distinct data streams once per batch
-5. Logstash indexes into the returned `logs-*` stream
+3. Logstash runs shared metadata rules from `classify_rules.json`
+   - **Hit:** set ECS fields locally; `POST /ensure/batch` only the first time a stream is seen
+   - **Miss:** buffer and `POST /classify/batch` (message-pattern / generic)
+4. Logstash indexes into `[@metadata][target_stream]`
+
+**Steady-state HTTP profile:** metadata-rich Splunk traffic → almost no classify HTTP; ensure HTTP only on newly seen data streams.
 
 ---
 
@@ -37,13 +46,16 @@ Splunk cooked tcpout :39998
 | Item | Where |
 |------|--------|
 | Batch classify (`/classify/batch` + Ruby buffer) | `sidecar/app.py`, `classify_batch.rb` |
+| Hybrid metadata-local classify + `/ensure/batch` | `classify_batch.rb`, `classify_rules.json`, `app.py` |
+| Shared metadata rules (Python + Logstash) | `sidecar/classify_rules.json` |
 | Persistent HTTP keep-alive to classify | `classify_batch.rb` |
 | HTTP outside buffer mutex | `classify_batch.rb` |
 | `flush_ms` flusher thread + tick input | `classify_batch.rb`, `logstash.conf` |
 | Final flush on Logstash shutdown | `classify_batch.rb` `flush(final)` |
 | Per-event isolation in batch classify | `sidecar/app.py` |
-| Metadata classify `@lru_cache` | `sidecar/classify.py` |
+| Metadata classify `@lru_cache` (sidecar message path) | `sidecar/classify.py` |
 | PUT-only data stream ensure | `sidecar/streams.py` |
+| Template warm at sidecar startup | `sidecar/app.py` lifespan |
 | `DataStreamManager.close()` on shutdown | `sidecar/app.py` lifespan |
 | Reused `httpx.Client` | `sidecar/streams.py` |
 | `stdout rubydebug` removed | `logstash.conf` |
@@ -56,10 +68,10 @@ Splunk cooked tcpout :39998
 | Cooked S2S via `s2s-decode` only (no Logstash s2s plugin) | compose + Dockerfile |
 | Logstash healthcheck | `docker-compose.yml` |
 | Classify fallback via boolean flag | `app.py` + `classify_batch.rb` |
-| Bounded `@buffer` / `@egress` + TCP backpressure | `classify_batch.rb` (`max_buffer` / `max_egress`) |
-| Omit full `message` when sourcetype/source present | `classify_batch.rb` `build_payload` |
+| Bounded `@buffer` / `@egress` + TCP backpressure | `classify_batch.rb` (`max_buffer` / `max_egress`; partial `take_batch`) |
 | ES ensure lock not held across HTTP; in-flight coalesce | `sidecar/streams.py` |
-| Dedupe stream ensures per batch | `sidecar/app.py` `_ensure_unique_streams` |
+| Coalesce waiters outlive template+stream cold path | `sidecar/streams.py` `_coalesce_wait_s` |
+| Dedupe stream ensures per batch | `sidecar/app.py` |
 | Short ES HTTP timeout (default 2s) | `sidecar/streams.py` `ELASTIC_HTTP_TIMEOUT_S` |
 
 ---
@@ -70,43 +82,29 @@ Splunk cooked tcpout :39998
 
 **File:** `sidecar/streams.py`, `sidecar/app.py`, `sidecar/Dockerfile`
 
-Classify handlers are sync `def` (threadpool). Four workers each have their own LRU + `_ensured` cache, so stream ensures and classify cache misses are duplicated. With a single Logstash HTTP client, extra workers add little throughput.
+Four workers each have their own `_ensured` cache (duplicate ES PUTs on cold streams). Less critical now that most traffic skips `/classify/batch`.
 
-**Fix:** Prefer `--workers 1` (or AsyncClient + async endpoints). Share ensure state only if multi-worker is required.
+**Fix:** Prefer `--workers 1` (or AsyncClient + async endpoints).
 
-> **Estimated impact:** Medium — better cache hit rate and fewer duplicate ES PUTs.
-
-### 🟡 2. Classify HTTP still serialized on one `Net::HTTP`
+### 🟡 2. Ensure/classify HTTP still serialized on one `Net::HTTP`
 
 **File:** `classify_batch.rb` `@http_mutex`
 
-All Logstash pipeline workers share one keep-alive connection.
+First-seen streams and message-path batches still share one connection.
 
-**Fix:** Connection pool, or single flusher-owned HTTP consumer with workers only enqueueing.
+**Fix:** Connection pool, or single flusher-owned HTTP consumer.
 
-> **Estimated impact:** Medium — higher classify RPS when sidecar has spare capacity.
+### 🟢 3. Message-path still hits sidecar
 
-### 🟢 3. Classify cache ignores message-only paths
-
-**File:** `sidecar/classify.py`
-
-`_classify_from_metadata` is cached; message-pattern classification is not (by design — high cardinality). Steady streams with empty sourcetype/source still pay regex cost per event (now on a ≤512B prefix).
-
-> **Estimated impact:** Low for typical Splunk metadata-rich traffic.
+Empty sourcetype/source events still use `/classify/batch` (intentional).
 
 ### 🟢 4. Exec tick is 1s resolution
 
-**File:** `logstash/pipeline/logstash.conf`
-
-The `_classify_tick` exec input wakes idle egress drain at 1s. The Ruby flusher thread still classifies on `flush_ms`, but pipeline re-injection while idle waits for the next tick or `periodic_flush`.
-
-> **Estimated impact:** Up to ~1s idle latency before classified events leave the Ruby filter.
+Idle re-inject of message-path egress can wait up to ~1s.
 
 ### 🟢 5. S2S decoder copies whole buffer per frame
 
 **File:** `s2s/s2s/decoder.py` `bytes(self._buf)`
-
-**Fix:** Parse from `memoryview` / offset APIs.
 
 ---
 
@@ -114,22 +112,23 @@ The `_classify_tick` exec input wakes idle egress drain at 1s. The Ruby flusher 
 
 | # | Item | Impact | Status |
 |---|------|--------|--------|
-| — | Batch classify | 🔴 High | ✅ Fixed |
-| — | HTTP keep-alive + mutex scope | 🔴 High | ✅ Fixed |
-| — | Metadata classify cache | 🟢 Low | ✅ Fixed |
-| — | PUT-only stream ensure | 🟢 Low | ✅ Fixed |
-| — | Bounded classify buffers + backpressure | 🔴 High | ✅ Fixed |
-| — | Omit message when metadata present | 🔴 High | ✅ Fixed |
-| — | Unlock ES ensure + batch dedupe + 2s timeout | 🔴 High | ✅ Fixed |
+| — | Hybrid metadata-local + ensure/batch | 🔴 High | ✅ Fixed |
+| — | Batch classify / keep-alive / bounded buffers | 🔴 High | ✅ Fixed |
+| — | Unlock ES ensure + coalesce waits | 🔴 High | ✅ Fixed |
 | — | S2S upstream reliability | 🔴 High | ✅ Fixed |
 | 1 | Uvicorn workers / shared cache | 🟡 Medium | Open |
-| 2 | Classify HTTP pool | 🟡 Medium | Open |
+| 2 | HTTP pool for ensure/classify | 🟡 Medium | Open |
 | 3 | Async ES client | 🟡 Medium | Open |
-| 4 | Message-path cache | 🟢 Low | Open (intentional) |
-| 5 | Sub-second idle tick | 🟢 Low | Open |
+| 4 | Sub-second idle tick | 🟢 Low | Open |
 
 ## Recommended next steps
 
-1. Drop classify to `--workers 1` (or move to async single process)
-2. Unblock classify HTTP (pool or single consumer thread)
-3. Optionally replace exec tick with a sub-second heartbeat if idle latency matters
+1. Drop classify to `--workers 1`
+2. Unblock Logstash→sidecar HTTP (pool or single consumer)
+3. Optionally replace exec tick with a sub-second heartbeat if idle message-path latency matters
+
+## Smoke checklist
+
+- Event with `sourcetype=access_combined` → local classify; one `/ensure/batch` then zero sidecar classify HTTP
+- Same stream again → zero HTTP
+- Empty sourcetype/source + access log `message` → `/classify/batch` still used

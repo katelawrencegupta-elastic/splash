@@ -6,7 +6,7 @@ COPY requirements.txt .
 ENV PIP_REQUIRE_HASHES=0
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY classify.py streams.py app.py ./
+COPY classify.py streams.py app.py classify_rules.json ./
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8080
