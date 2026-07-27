@@ -1,11 +1,11 @@
-"""Ensure ECS data streams exist in Elasticsearch (idempotent)."""
+"""Ensure ECS data streams exist in Elasticsearch (idempotent, async)."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
-import threading
 from typing import Any
 
 import httpx
@@ -81,7 +81,7 @@ class DataStreamManager:
     """Creates index template + data streams; caches names already ensured.
 
     HTTP runs outside the cache lock. Concurrent ensures for the same name
-    coalesce on an in-flight Event so only one PUT is issued.
+    coalesce on an in-flight asyncio.Event so only one PUT is issued.
     """
 
     def __init__(self, elastic_host: str, api_key: str) -> None:
@@ -91,17 +91,17 @@ class DataStreamManager:
             "Content-Type": "application/json",
         }
         timeout = httpx.Timeout(_ES_TIMEOUT_S, connect=_ES_TIMEOUT_S)
-        self._client = httpx.Client(timeout=timeout, headers=self._headers)
+        self._client = httpx.AsyncClient(timeout=timeout, headers=self._headers)
         self._ensured: set[str] = set()
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
         self._template_ready = False
-        self._template_event: threading.Event | None = None
-        self._inflight: dict[str, threading.Event] = {}
+        self._template_event: asyncio.Event | None = None
+        self._inflight: dict[str, asyncio.Event] = {}
 
-    def close(self) -> None:
-        self._client.close()
+    async def close(self) -> None:
+        await self._client.aclose()
 
-    def _request(
+    async def _request(
         self,
         method: str,
         path: str,
@@ -109,39 +109,41 @@ class DataStreamManager:
         json_body: dict | None = None,
     ) -> tuple[int, Any]:
         url = f"{self._host}{path}"
-        resp = self._client.request(method, url, json=json_body)
+        resp = await self._client.request(method, url, json=json_body)
         try:
             body: Any = resp.json()
         except Exception:
             body = resp.text
         return resp.status_code, body
 
-    def ensure_template(self) -> None:
+    async def ensure_template(self) -> None:
         if self._template_ready:
             return
 
-        wait_event: threading.Event | None = None
+        wait_event: asyncio.Event | None = None
         do_work = False
-        with self._lock:
+        async with self._lock:
             if self._template_ready:
                 return
             if self._template_event is not None:
                 wait_event = self._template_event
             else:
-                wait_event = threading.Event()
+                wait_event = asyncio.Event()
                 self._template_event = wait_event
                 do_work = True
 
         if not do_work:
             assert wait_event is not None
-            if not wait_event.wait(timeout=_coalesce_wait_s(1)):
-                raise RuntimeError("index template ensure timed out waiting")
+            try:
+                await asyncio.wait_for(wait_event.wait(), timeout=_coalesce_wait_s(1))
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("index template ensure timed out waiting") from exc
             if not self._template_ready:
-                raise RuntimeError("index template ensure failed in another thread")
+                raise RuntimeError("index template ensure failed in another task")
             return
 
         try:
-            status, body = self._request(
+            status, body = await self._request(
                 "PUT",
                 f"/_index_template/{TEMPLATE_NAME}",
                 json_body=INDEX_TEMPLATE,
@@ -150,15 +152,15 @@ class DataStreamManager:
                 raise RuntimeError(
                     f"index template put failed status={status} body={body}"
                 )
-            with self._lock:
+            async with self._lock:
                 self._template_ready = True
             logger.info("Ensured index template %s", TEMPLATE_NAME)
         finally:
-            with self._lock:
+            async with self._lock:
                 self._template_event = None
             wait_event.set()
 
-    def ensure_data_stream(self, name: str) -> None:
+    async def ensure_data_stream(self, name: str) -> None:
         """Idempotently create data stream ``name`` (e.g. logs-access_log-default).
 
         PUT-only: ``resource_already_exists_exception`` is treated as success, so
@@ -168,40 +170,45 @@ class DataStreamManager:
         if name in self._ensured:
             return
 
-        wait_event: threading.Event | None = None
+        wait_event: asyncio.Event | None = None
         do_work = False
-        with self._lock:
+        async with self._lock:
             if name in self._ensured:
                 return
             existing = self._inflight.get(name)
             if existing is not None:
                 wait_event = existing
             else:
-                wait_event = threading.Event()
+                wait_event = asyncio.Event()
                 self._inflight[name] = wait_event
                 do_work = True
 
         if not do_work:
             assert wait_event is not None
-            # Worker may still be ensuring template (1×) then the stream (1×).
-            if not wait_event.wait(timeout=_coalesce_wait_s(2)):
-                raise RuntimeError(f"data stream ensure timed out waiting name={name}")
+            try:
+                await asyncio.wait_for(wait_event.wait(), timeout=_coalesce_wait_s(2))
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError(
+                    f"data stream ensure timed out waiting name={name}"
+                ) from exc
             if name not in self._ensured:
-                raise RuntimeError(f"data stream ensure failed in another thread name={name}")
+                raise RuntimeError(
+                    f"data stream ensure failed in another task name={name}"
+                )
             return
 
         try:
-            self.ensure_template()
-            status, body = self._request("PUT", f"/_data_stream/{name}")
+            await self.ensure_template()
+            status, body = await self._request("PUT", f"/_data_stream/{name}")
             if status in (200, 201):
-                with self._lock:
+                async with self._lock:
                     self._ensured.add(name)
                 logger.info("Created data stream %s", name)
                 return
             if status == 400 and isinstance(body, dict):
                 err_type = body.get("error", {}).get("type", "")
                 if err_type == "resource_already_exists_exception":
-                    with self._lock:
+                    async with self._lock:
                         self._ensured.add(name)
                     logger.debug("Data stream already exists: %s", name)
                     return
@@ -209,6 +216,6 @@ class DataStreamManager:
                 f"data stream create failed name={name} status={status} body={body}"
             )
         finally:
-            with self._lock:
+            async with self._lock:
                 self._inflight.pop(name, None)
             wait_event.set()

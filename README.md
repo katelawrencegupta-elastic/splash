@@ -88,8 +88,17 @@ docker compose up --build -d
 | `CLASSIFY_MAX_EGRESS` | `5000` | Classified-but-not-reinjected cap |
 | `CLASSIFY_MESSAGE_PREFIX_BYTES` | `512` | Message prefix on metadata-miss path |
 | `ELASTIC_HTTP_TIMEOUT_S` | `2.0` | Sidecar → ES HTTP timeout |
+| `ELASTIC_ENSURE_CONCURRENCY` | `8` | Max parallel stream ensures per batch |
+| `UVICORN_WORKERS` | `1` | Keep `1` for a single `_ensured`/LRU cache |
+| `CLASSIFY_HTTP_POOL` | `4` | Logstash keep-alive connections to classify |
 | `LS_JAVA_OPTS` | `-Xms1g -Xmx1g` | Logstash heap |
 | `S2S_UPSTREAM_*` | see compose | Decoder → Logstash queue / batch |
+
+### Tuning
+
+- Prefer `UVICORN_WORKERS=1` so ensure/classify caches stay in one process.
+- Size `CLASSIFY_HTTP_POOL` near Logstash pipeline worker count (default 4).
+- Raise `ELASTIC_ENSURE_CONCURRENCY` only if cold multi-stream batches are slow and ES can take the load.
 
 ## Sidecar API
 

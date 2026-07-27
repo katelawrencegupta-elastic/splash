@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
@@ -24,13 +25,16 @@ logger = logging.getLogger("splash.classify")
 ELASTIC_HOST = os.environ.get("ELASTIC_HOST", "").strip().rstrip("/")
 ELASTIC_API_KEY = os.environ.get("ELASTIC_API_KEY", "").strip()
 DATA_STREAM_NAMESPACE = os.environ.get("DATA_STREAM_NAMESPACE", "default")
+ELASTIC_ENSURE_CONCURRENCY = max(
+    1, int(os.environ.get("ELASTIC_ENSURE_CONCURRENCY", "8"))
+)
 
 _manager: Optional[DataStreamManager] = None
 _manager_lock = threading.Lock()
 
 
 def get_manager() -> DataStreamManager:
-    """Return the process-wide DataStreamManager (safe under uvicorn threadpool)."""
+    """Return the process-wide DataStreamManager (single uvicorn worker)."""
     global _manager
     if _manager is not None:
         return _manager
@@ -51,17 +55,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError("ELASTIC_HOST is required (set it in the environment)")
     if not ELASTIC_API_KEY:
         raise RuntimeError("ELASTIC_API_KEY is required (set it in the environment)")
-    # Eager init + warm index template so first ensure is stream-only.
     manager = get_manager()
     try:
-        manager.ensure_template()
+        await manager.ensure_template()
     except Exception:
         logger.exception("Failed to ensure index template at startup; will retry on demand")
     yield
     global _manager
     with _manager_lock:
         if _manager is not None:
-            _manager.close()
+            await _manager.close()
             _manager = None
             logger.info("Closed DataStreamManager HTTP client")
 
@@ -150,48 +153,51 @@ def _classify_fields(req: ClassifyRequest) -> ClassifyResponse:
     )
 
 
-def _ensure_stream_or_fallback(result: ClassifyResponse) -> ClassifyResponse:
-    """Ensure the target stream; on failure, downgrade this event only."""
+async def _ensure_one(manager: DataStreamManager, stream: str) -> bool:
     try:
-        get_manager().ensure_data_stream(result.data_stream)
+        await manager.ensure_data_stream(stream)
+        return True
+    except Exception:
+        logger.exception("Failed to ensure data stream %s; falling back", stream)
+        return False
+
+
+async def _ensure_stream_or_fallback(result: ClassifyResponse) -> ClassifyResponse:
+    """Ensure the target stream; on failure, downgrade this event only."""
+    manager = get_manager()
+    if await _ensure_one(manager, result.data_stream):
         return result
-    except Exception as exc:
-        logger.exception(
-            "Failed to ensure data stream %s; falling back", result.data_stream
-        )
-        fallback = _fallback_response(
-            reason=f"fallback=ensure_failed:{type(exc).__name__}"
-        )
-        try:
-            get_manager().ensure_data_stream(fallback.data_stream)
-        except Exception:
-            logger.exception("Failed to ensure fallback stream %s", fallback.data_stream)
-        return fallback
+    fallback = _fallback_response(reason="fallback=ensure_failed:RuntimeError")
+    await _ensure_one(manager, fallback.data_stream)
+    return fallback
 
 
-def _ensure_unique_streams(
+async def _ensure_many(manager: DataStreamManager, streams: list[str]) -> dict[str, bool]:
+    """Ensure streams concurrently, capped by ELASTIC_ENSURE_CONCURRENCY."""
+    sem = asyncio.Semaphore(ELASTIC_ENSURE_CONCURRENCY)
+    ok: dict[str, bool] = {}
+
+    async def one(stream: str) -> None:
+        async with sem:
+            ok[stream] = await _ensure_one(manager, stream)
+
+    await asyncio.gather(*(one(s) for s in streams))
+    return ok
+
+
+async def _ensure_unique_streams(
     results: list[ClassifyResponse],
 ) -> list[ClassifyResponse]:
     """Ensure each distinct data_stream once, then map failures to fallback."""
     manager = get_manager()
-    unique = {r.data_stream for r in results}
-    ok: dict[str, bool] = {}
-    for stream in unique:
-        try:
-            manager.ensure_data_stream(stream)
-            ok[stream] = True
-        except Exception:
-            logger.exception("Failed to ensure data stream %s; falling back", stream)
-            ok[stream] = False
+    unique = list({r.data_stream for r in results})
+    ok = await _ensure_many(manager, unique)
 
     if all(ok.values()):
         return results
 
     fallback_stream = _fallback_stream_name()
-    try:
-        manager.ensure_data_stream(fallback_stream)
-    except Exception:
-        logger.exception("Failed to ensure fallback stream %s", fallback_stream)
+    await _ensure_one(manager, fallback_stream)
 
     out: list[ClassifyResponse] = []
     for result in results:
@@ -204,10 +210,9 @@ def _ensure_unique_streams(
     return out
 
 
-def _ensure_streams_batch(streams: list[str]) -> list[EnsureStreamResult]:
+async def _ensure_streams_batch(streams: list[str]) -> list[EnsureStreamResult]:
     """Ensure each distinct stream once; failures resolve to the generic fallback."""
     manager = get_manager()
-    # Preserve request order of first occurrence; dedupe work.
     ordered_unique: list[str] = []
     seen: set[str] = set()
     for name in streams:
@@ -217,21 +222,10 @@ def _ensure_streams_batch(streams: list[str]) -> list[EnsureStreamResult]:
         seen.add(stream)
         ordered_unique.append(stream)
 
-    ok: dict[str, bool] = {}
-    for stream in ordered_unique:
-        try:
-            manager.ensure_data_stream(stream)
-            ok[stream] = True
-        except Exception:
-            logger.exception("Failed to ensure data stream %s; falling back", stream)
-            ok[stream] = False
+    ok = await _ensure_many(manager, ordered_unique)
 
     if not all(ok.values()):
-        fallback = _fallback_stream_name()
-        try:
-            manager.ensure_data_stream(fallback)
-        except Exception:
-            logger.exception("Failed to ensure fallback stream %s", fallback)
+        await _ensure_one(manager, _fallback_stream_name())
 
     fallback_name = _fallback_stream_name()
     results: list[EnsureStreamResult] = []
@@ -263,17 +257,17 @@ def health() -> dict[str, str]:
 
 
 @app.post("/classify", response_model=ClassifyResponse)
-def classify(req: ClassifyRequest) -> ClassifyResponse:
+async def classify(req: ClassifyRequest) -> ClassifyResponse:
     try:
         result = _classify_fields(req)
     except Exception as exc:
         logger.exception("classify failed for single event")
         raise HTTPException(status_code=500, detail=f"classify failed: {exc}") from exc
-    return _ensure_stream_or_fallback(result)
+    return await _ensure_stream_or_fallback(result)
 
 
 @app.post("/classify/batch", response_model=BatchClassifyResponse)
-def classify_batch(req: BatchClassifyRequest) -> BatchClassifyResponse:
+async def classify_batch(req: BatchClassifyRequest) -> BatchClassifyResponse:
     if not req.events:
         return BatchClassifyResponse(results=[])
     if len(req.events) > 2000:
@@ -287,13 +281,13 @@ def classify_batch(req: BatchClassifyRequest) -> BatchClassifyResponse:
             logger.exception("classify failed for one event in batch; isolating")
             classified.append(_fallback_response(reason="fallback=classify_error"))
 
-    return BatchClassifyResponse(results=_ensure_unique_streams(classified))
+    return BatchClassifyResponse(results=await _ensure_unique_streams(classified))
 
 
 @app.post("/ensure/batch", response_model=EnsureBatchResponse)
-def ensure_batch(req: EnsureBatchRequest) -> EnsureBatchResponse:
+async def ensure_batch(req: EnsureBatchRequest) -> EnsureBatchResponse:
     if not req.streams:
         return EnsureBatchResponse(results=[])
     if len(req.streams) > 2000:
         raise HTTPException(status_code=400, detail="batch too large (max 2000)")
-    return EnsureBatchResponse(results=_ensure_streams_batch(req.streams))
+    return EnsureBatchResponse(results=await _ensure_streams_batch(req.streams))

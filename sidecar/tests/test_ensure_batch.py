@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -46,6 +46,9 @@ def test_metadata_parity_table() -> None:
 
 def test_ensure_batch_endpoint() -> None:
     manager = MagicMock()
+    manager.ensure_data_stream = AsyncMock()
+    manager.ensure_template = AsyncMock()
+    manager.close = AsyncMock()
 
     with (
         patch("app.ELASTIC_HOST", "https://es.example"),
@@ -71,17 +74,19 @@ def test_ensure_batch_endpoint() -> None:
         assert len(body["results"]) == 2
         assert body["results"][0]["ok"] is True
         assert body["results"][0]["resolved_stream"] == "logs-access_log-default"
-        assert manager.ensure_data_stream.call_count == 2
+        assert manager.ensure_data_stream.await_count == 2
 
 
 def test_ensure_batch_fallback_on_failure() -> None:
     manager = MagicMock()
+    manager.ensure_template = AsyncMock()
+    manager.close = AsyncMock()
 
-    def ensure(name: str) -> None:
+    async def ensure(name: str) -> None:
         if name == "logs-access_log-default":
             raise RuntimeError("boom")
 
-    manager.ensure_data_stream.side_effect = ensure
+    manager.ensure_data_stream = AsyncMock(side_effect=ensure)
 
     with (
         patch("app.ELASTIC_HOST", "https://es.example"),

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from app import (
     ClassifyRequest,
@@ -24,34 +26,37 @@ def _resp(stream: str) -> ClassifyResponse:
     )
 
 
-def test_ensure_unique_streams_calls_ensure_once_per_name() -> None:
+@pytest.mark.asyncio
+async def test_ensure_unique_streams_calls_ensure_once_per_name() -> None:
     manager = MagicMock()
+    manager.ensure_data_stream = AsyncMock()
     results = [
         _resp("logs-access_log-default"),
         _resp("logs-access_log-default"),
         _resp("logs-syslog-default"),
     ]
     with patch("app.get_manager", return_value=manager):
-        out = _ensure_unique_streams(results)
+        out = await _ensure_unique_streams(results)
 
     assert out == results
-    assert manager.ensure_data_stream.call_count == 2
-    names = {c.args[0] for c in manager.ensure_data_stream.call_args_list}
+    assert manager.ensure_data_stream.await_count == 2
+    names = {c.args[0] for c in manager.ensure_data_stream.await_args_list}
     assert names == {"logs-access_log-default", "logs-syslog-default"}
 
 
-def test_ensure_unique_streams_falls_back_on_failure() -> None:
+@pytest.mark.asyncio
+async def test_ensure_unique_streams_falls_back_on_failure() -> None:
     manager = MagicMock()
 
-    def ensure(name: str) -> None:
+    async def ensure(name: str) -> None:
         if name == "logs-access_log-default":
             raise RuntimeError("boom")
 
-    manager.ensure_data_stream.side_effect = ensure
+    manager.ensure_data_stream = AsyncMock(side_effect=ensure)
     results = [_resp("logs-access_log-default"), _resp("logs-syslog-default")]
 
     with patch("app.get_manager", return_value=manager):
-        out = _ensure_unique_streams(results)
+        out = await _ensure_unique_streams(results)
 
     assert out[0].fallback is True
     assert out[0].data_stream.startswith("logs-generic-")
@@ -71,6 +76,9 @@ def test_batch_endpoint_dedupes_ensures() -> None:
     from fastapi.testclient import TestClient
 
     manager = MagicMock()
+    manager.ensure_data_stream = AsyncMock()
+    manager.ensure_template = AsyncMock()
+    manager.close = AsyncMock()
     with (
         patch("app.ELASTIC_HOST", "https://es.example"),
         patch("app.ELASTIC_API_KEY", "id:secret"),
@@ -89,4 +97,4 @@ def test_batch_endpoint_dedupes_ensures() -> None:
         assert resp.status_code == 200
         body = resp.json()
         assert len(body["results"]) == 2
-        assert manager.ensure_data_stream.call_count == 1
+        assert manager.ensure_data_stream.await_count == 1

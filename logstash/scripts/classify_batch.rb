@@ -6,7 +6,8 @@
 # - Metadata miss → buffer and POST /classify/batch (message-pattern / generic path).
 #
 # script_params: classify_url, batch_size, flush_ms, max_buffer, max_egress,
-#                message_prefix_bytes, data_stream_namespace, rules_path
+#                message_prefix_bytes, data_stream_namespace, rules_path,
+#                http_pool_size
 
 def register(params)
   require "json"
@@ -31,6 +32,8 @@ def register(params)
   @namespace = (params["data_stream_namespace"] || "default").to_s
   @namespace = "default" if @namespace.empty?
   @rules_path = (params["rules_path"] || "/usr/share/logstash/scripts/classify_rules.json").to_s
+  @http_pool_size = (params["http_pool_size"] || 4).to_i
+  @http_pool_size = 1 if @http_pool_size < 1
 
   load_metadata_rules!(@rules_path)
 
@@ -41,12 +44,8 @@ def register(params)
 
   @batch_uri = URI.parse(@batch_url)
   @ensure_uri = URI.parse(@ensure_url)
-  @http = Net::HTTP.new(@batch_uri.host, @batch_uri.port)
-  @http.open_timeout = 5
-  @http.read_timeout = 30
-  @http.keep_alive_timeout = 60
-  @http.start
-  @http_mutex = Mutex.new
+  @http_pool = Queue.new
+  @http_pool_size.times { @http_pool << start_http_client! }
 
   @ensured = Set.new
   @ensured_mutex = Mutex.new
@@ -96,11 +95,7 @@ def close
     log_error("classify_batch close: #{dropped} classified event(s) not re-injected (no final flush)")
   end
 
-  begin
-    @http.finish if @http&.started?
-  rescue StandardError
-    nil
-  end
+  drain_http_pool!
 end
 
 def log_error(message)
@@ -382,10 +377,7 @@ def post_classify_batch(payloads)
   req["Connection"] = "keep-alive"
   req.body = JSON.generate("events" => payloads)
 
-  resp = @http_mutex.synchronize do
-    ensure_http_started!
-    @http.request(req)
-  end
+  resp = with_http { |http| http.request(req) }
 
   unless resp.is_a?(Net::HTTPSuccess)
     log_error("classify_batch HTTP #{resp.code}: #{resp.body.to_s[0, 500]}")
@@ -400,11 +392,6 @@ def post_classify_batch(payloads)
   results
 rescue StandardError => e
   log_error("classify_batch failed: #{e.class}: #{e.message}")
-  begin
-    @http_mutex.synchronize { restart_http! }
-  rescue StandardError
-    nil
-  end
   Array.new(payloads.length) { fallback_result }
 end
 
@@ -414,10 +401,7 @@ def post_ensure(streams)
   req["Connection"] = "keep-alive"
   req.body = JSON.generate("streams" => streams)
 
-  resp = @http_mutex.synchronize do
-    ensure_http_started!
-    @http.request(req)
-  end
+  resp = with_http { |http| http.request(req) }
 
   unless resp.is_a?(Net::HTTPSuccess)
     log_error("ensure_batch HTTP #{resp.code}: #{resp.body.to_s[0, 500]}")
@@ -437,11 +421,6 @@ def post_ensure(streams)
   results
 rescue StandardError => e
   log_error("ensure_batch failed: #{e.class}: #{e.message}")
-  begin
-    @http_mutex.synchronize { restart_http! }
-  rescue StandardError
-    nil
-  end
   streams.map do |s|
     {
       "data_stream" => s,
@@ -452,23 +431,54 @@ rescue StandardError => e
   end
 end
 
-def ensure_http_started!
-  return if @http.started?
-
-  @http.start
+def start_http_client!
+  http = Net::HTTP.new(@batch_uri.host, @batch_uri.port)
+  http.open_timeout = 5
+  http.read_timeout = 30
+  http.keep_alive_timeout = 60
+  http.start
+  http
 end
 
-def restart_http!
+def finish_http_client!(http)
+  return if http.nil?
+
   begin
-    @http.finish if @http.started?
+    http.finish if http.started?
   rescue StandardError
     nil
   end
-  @http = Net::HTTP.new(@batch_uri.host, @batch_uri.port)
-  @http.open_timeout = 5
-  @http.read_timeout = 30
-  @http.keep_alive_timeout = 60
-  @http.start
+end
+
+def restart_http_client!(http)
+  finish_http_client!(http)
+  start_http_client!
+end
+
+# Checkout a pooled keep-alive client; on transport failure replace it before return.
+def with_http
+  http = @http_pool.pop
+  begin
+    yield http
+  rescue StandardError
+    http = restart_http_client!(http)
+    raise
+  ensure
+    @http_pool.push(http) if http
+  end
+end
+
+def drain_http_pool!
+  return unless defined?(@http_pool) && @http_pool
+
+  @http_pool_size.times do
+    begin
+      http = @http_pool.pop(true)
+    rescue ThreadError
+      break
+    end
+    finish_http_client!(http)
+  end
 end
 
 def fallback_result
