@@ -69,6 +69,32 @@ Ingest ports bind to `127.0.0.1` by default (`INGEST_BIND`). For remote forwarde
 
 At startup, classify ensures `frosty-parse-access-log`, `frosty-parse-syslog`, and `frosty-parse-generic` exist (creates empty stubs if missing; never overwrites existing pipelines). `/health` stays 503 until that succeeds. Logstash DLQ captures residual ES output failures.
 
+## Horizontal scaling (shards)
+
+Each shard is a full compose project (own classify + logstash + s2s-decode) with **offset host ports** so several stacks can share one machine. Measured stable capacity is ~0.009 GB/s per shard (hot path).
+
+```bash
+# Shard 0 → :39997 / :39998
+./scripts/run-shard.sh 0 up --build -d
+
+# Shard 1 → :40007 / :40008
+./scripts/run-shard.sh 1 up --build -d
+
+# Status / tear down
+./scripts/run-shard.sh 0 ps
+./scripts/run-shard.sh 1 down
+```
+
+| `SHARD_ID` | Uncooked host port | Cooked host port |
+|------------|--------------------|------------------|
+| 0 | 39997 | 39998 |
+| 1 | 40007 | 40008 |
+| 2 | 40017 | 40018 |
+
+Stride defaults to **10** (`SHARD_PORT_STRIDE`). Overlay: [`docker-compose.shard.yml`](docker-compose.shard.yml). Point Splunk at all cooked (or uncooked) ports — see multi-server examples in [`splunk/outputs.conf`](splunk/outputs.conf).
+
+For remote forwarders: `INGEST_BIND=0.0.0.0 ./scripts/run-shard.sh N up -d`.
+
 ## Ports
 
 | Port | Service | Purpose |
@@ -119,17 +145,15 @@ At startup, classify ensures `frosty-parse-access-log`, `frosty-parse-syslog`, a
 ```
 splash/
 ├── docker-compose.yml
-├── PERFORMANCE.md          # Perf notes and remaining bottlenecks
-├── sidecar/                # FastAPI classify + ES ensure
-│   ├── classify_rules.json # Shared metadata rules (canonical)
-│   ├── classify.py
-│   ├── streams.py
-│   └── app.py
-├── logstash/               # Pipeline + hybrid Ruby filter
-│   ├── pipeline/logstash.conf
-│   └── scripts/classify_batch.rb
-├── s2s/                    # Cooked S2S decoder
-└── splunk/outputs.conf     # Sample forwarder config
+├── docker-compose.shard.yml # Horizontal shards (port offsets)
+├── docker-compose.loadtest.yml
+├── scripts/run-shard.sh    # COMPOSE_PROJECT_NAME + port helper
+├── PERFORMANCE.md
+├── loadtest/               # Synthetic load harness
+├── sidecar/
+├── logstash/
+├── s2s/
+└── splunk/outputs.conf     # Single + multi-server tcpout examples
 ```
 
 ## Development
@@ -141,6 +165,15 @@ cd sidecar
 python3.13 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt pytest
 PYTHONPATH=. pytest -q tests/
+```
+
+Load test (stack must be up with `docker-compose.loadtest.yml`):
+
+```bash
+cd loadtest
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python -m loadtest run -s S1 --eps 1000 --duration 30 --steady-only
 ```
 
 Keep `sidecar/classify_rules.json` and `logstash/scripts/classify_rules.json` in sync (compose overlays the sidecar file at runtime; a unit test asserts the copies match).

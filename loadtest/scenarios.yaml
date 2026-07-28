@@ -1,0 +1,51 @@
+# Load-test scenarios for Splash (see README.md).
+# Durations are defaults; CLI --duration / --eps override target rate and steady length.
+
+defaults:
+  event_bytes: 1536
+  connections: 8
+  namespace: loadtest
+  warm_eps: 500
+  warm_seconds: 60
+  burst_multiplier: 2.0
+  burst_seconds: 45
+  observe_interval_s: 5.0
+  cooked_host: "127.0.0.1"
+  cooked_port: 39998
+  uncooked_host: "127.0.0.1"
+  uncooked_port: 39997
+  s2s_health_url: "http://127.0.0.1:8081/health"
+  classify_health_url: "http://127.0.0.1:8080/health"
+  logstash_stats_url: "http://127.0.0.1:9600/_node/stats"
+  # Optional ES verification (also via ELASTIC_HOST / ELASTIC_API_KEY env)
+  elastic_host: ""
+  elastic_api_key: ""
+
+scenarios:
+  S1:
+    name: hot_cooked
+    description: Known sourcetype/source — local classify, LS+ES ceiling
+    path: cooked
+    hot_fraction: 1.0
+    target_eps: 5000
+
+  S2:
+    name: cold_cooked
+    description: Empty sourcetype/source — /classify/batch path
+    path: cooked
+    hot_fraction: 0.0
+    target_eps: 2500
+
+  S3:
+    name: mixed_90_10
+    description: 90% hot + 10% cold — realistic drag
+    path: cooked
+    hot_fraction: 0.9
+    target_eps: 5000
+
+  S4:
+    name: uncooked_hot
+    description: Plain TCP hot metadata — skip s2s-decode
+    path: uncooked
+    hot_fraction: 1.0
+    target_eps: 5000

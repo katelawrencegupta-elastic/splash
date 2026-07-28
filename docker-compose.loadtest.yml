@@ -1,0 +1,11 @@
+services:
+  # Publish internal health/metrics on loopback for the load-test observer.
+  classify:
+    ports:
+      - "127.0.0.1:8080:8080"
+  logstash:
+    ports:
+      - "127.0.0.1:9600:9600"
+  s2s-decode:
+    ports:
+      - "127.0.0.1:8081:8081"

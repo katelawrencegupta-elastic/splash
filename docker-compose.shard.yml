@@ -1,0 +1,37 @@
+# Horizontal shard overlay for Splash.
+#
+# Each shard is a full compose project (own network, classify, logstash, s2s-decode)
+# with host ports offset by SHARD_ID so many stacks can share one machine.
+#
+# Port map (default stride 10):
+#   SHARD_ID=0 → uncooked 39997, cooked 39998
+#   SHARD_ID=1 → uncooked 40007, cooked 40008
+#   SHARD_ID=2 → uncooked 40017, cooked 40018
+#
+# Quick start (preferred — sets project name + ports):
+#   ./scripts/run-shard.sh 0 up --build -d
+#   ./scripts/run-shard.sh 1 up --build -d
+#
+# Manual equivalent:
+#   export COMPOSE_PROJECT_NAME=splash0
+#   export UNCOOKED_HOST_PORT=39997 COOKED_HOST_PORT=39998
+#   export INGEST_BIND=0.0.0.0   # remote Splunk; keep 127.0.0.1 for local only
+#   docker compose -f docker-compose.yml -f docker-compose.shard.yml up -d
+#
+# Splunk: see splunk/outputs.conf (multi-server cooked/uncooked examples).
+#
+# Note: This overlay replaces published ingest ports from the base file via
+# Compose's ports:!override (Compose v2.24+). Use scripts/run-shard.sh if unsure.
+
+services:
+  # Allow multiple projects on one host (base file pins these names).
+  classify:
+    container_name: !reset null
+  logstash:
+    container_name: !reset null
+    ports: !override
+      - "${INGEST_BIND:-127.0.0.1}:${UNCOOKED_HOST_PORT:-39997}:39997"
+  s2s-decode:
+    container_name: !reset null
+    ports: !override
+      - "${INGEST_BIND:-127.0.0.1}:${COOKED_HOST_PORT:-39998}:39998"
