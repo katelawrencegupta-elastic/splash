@@ -65,6 +65,10 @@ docker compose up --build -d
 - Cooked S2S → `:39998` (`s2s-decode`)
 - Uncooked plain → `:39997` (`logstash`)
 
+Ingest ports bind to `127.0.0.1` by default (`INGEST_BIND`). For remote forwarders set `INGEST_BIND=0.0.0.0` in `.env`.
+
+At startup, classify ensures `frosty-parse-access-log`, `frosty-parse-syslog`, and `frosty-parse-generic` exist (creates empty stubs if missing; never overwrites existing pipelines). `/health` stays 503 until that succeeds. Logstash DLQ captures residual ES output failures.
+
 ## Ports
 
 | Port | Service | Purpose |
@@ -81,6 +85,7 @@ docker compose up --build -d
 |----------|---------|-------|
 | `ELASTIC_HOST` | _(required)_ | Elasticsearch / Elastic Cloud URL |
 | `ELASTIC_API_KEY` | _(required)_ | ApiKey (`id:secret` or base64) |
+| `INGEST_BIND` | `127.0.0.1` | Host bind for published `:39997`/`:39998` |
 | `DATA_STREAM_NAMESPACE` | `default` | ECS namespace segment |
 | `CLASSIFY_BATCH_SIZE` | `100` | Message-path batch size |
 | `CLASSIFY_FLUSH_MS` | `200` | Message-path flush interval |

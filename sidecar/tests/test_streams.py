@@ -109,3 +109,60 @@ async def test_ensure_treats_already_exists_as_success(manager: DataStreamManage
 
     await manager.ensure_data_stream("logs-generic-default")
     assert "logs-generic-default" in manager._ensured
+
+
+def _missing_pipeline_resp() -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = 404
+    resp.json.return_value = {
+        "error": {"type": "resource_not_found_exception", "reason": "missing"}
+    }
+    return resp
+
+
+@pytest.mark.asyncio
+async def test_ensure_ingest_pipeline_skips_when_present(
+    manager: DataStreamManager,
+) -> None:
+    manager._client.request.side_effect = [_ok_resp()]
+
+    await manager.ensure_ingest_pipeline("frosty-parse-generic")
+
+    assert manager._client.request.await_count == 1
+    method, url = manager._client.request.await_args_list[0].args[:2]
+    assert method == "GET"
+    assert url.endswith("/_ingest/pipeline/frosty-parse-generic")
+
+
+@pytest.mark.asyncio
+async def test_ensure_ingest_pipeline_creates_stub_when_missing(
+    manager: DataStreamManager,
+) -> None:
+    manager._client.request.side_effect = [_missing_pipeline_resp(), _ok_resp()]
+
+    await manager.ensure_ingest_pipeline("frosty-parse-access-log")
+
+    assert manager._client.request.await_count == 2
+    methods = [c.args[0] for c in manager._client.request.await_args_list]
+    assert methods == ["GET", "PUT"]
+    put_kwargs = manager._client.request.await_args_list[1].kwargs
+    assert put_kwargs["json"]["processors"] == []
+
+
+@pytest.mark.asyncio
+async def test_ensure_ingest_pipelines_covers_all_kinds(
+    manager: DataStreamManager,
+) -> None:
+    from streams import required_ingest_pipelines
+
+    names = required_ingest_pipelines()
+    assert names == [
+        "frosty-parse-access-log",
+        "frosty-parse-syslog",
+        "frosty-parse-generic",
+    ]
+    # Each name: GET (present) → no PUT
+    manager._client.request.side_effect = [_ok_resp()] * len(names)
+    ensured = await manager.ensure_ingest_pipelines()
+    assert ensured == names
+    assert manager._client.request.await_count == len(names)

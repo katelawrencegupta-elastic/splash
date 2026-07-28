@@ -3,3 +3,7 @@ xpack.monitoring.enabled: false
 # pipeline.workers omitted: Logstash defaults to available CPU cores ("auto").
 # Explicit "auto" is invalid (must be Integer).
 pipeline.batch.size: 500
+# Capture ES output failures (missing pipeline, mapping errors, …) instead of
+# endless retries that back-pressure into Splunk.
+dead_letter_queue.enable: true
+dead_letter_queue.max_bytes: 1073741824

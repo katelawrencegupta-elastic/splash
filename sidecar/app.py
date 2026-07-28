@@ -12,7 +12,7 @@ from typing import AsyncIterator, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from classify import classify_event, data_stream_name
+from classify import EventKind, classify_event, data_stream_name, parser_pipeline_name
 from streams import DataStreamManager
 
 logging.basicConfig(
@@ -31,6 +31,7 @@ ELASTIC_ENSURE_CONCURRENCY = max(
 
 _manager: Optional[DataStreamManager] = None
 _manager_lock = threading.Lock()
+_pipelines_ready = False
 
 
 def get_manager() -> DataStreamManager:
@@ -51,6 +52,7 @@ def get_manager() -> DataStreamManager:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    global _pipelines_ready
     if not ELASTIC_HOST:
         raise RuntimeError("ELASTIC_HOST is required (set it in the environment)")
     if not ELASTIC_API_KEY:
@@ -59,9 +61,22 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         await manager.ensure_template()
     except Exception:
-        logger.exception("Failed to ensure index template at startup; will retry on demand")
+        logger.exception(
+            "Failed to ensure index template at startup; will retry on demand"
+        )
+    try:
+        ensured = await manager.ensure_ingest_pipelines()
+        _pipelines_ready = True
+        logger.info("Ingest pipelines ready: %s", ", ".join(ensured))
+    except Exception:
+        _pipelines_ready = False
+        logger.exception(
+            "Failed to ensure frosty-parse-* ingest pipelines; /health will be 503 "
+            "until ensure succeeds"
+        )
     yield
     global _manager
+    _pipelines_ready = False
     with _manager_lock:
         if _manager is not None:
             await _manager.close()
@@ -122,7 +137,7 @@ def _fallback_response(*, reason: str) -> ClassifyResponse:
         dataset="generic",
         namespace=namespace,
         data_stream=f"logs-generic-{namespace}",
-        pipeline_name="frosty-parse-generic",
+        pipeline_name=parser_pipeline_name(EventKind.GENERIC),
         reason=reason,
         fallback=True,
     )
@@ -252,8 +267,32 @@ async def _ensure_streams_batch(streams: list[str]) -> list[EnsureStreamResult]:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "elastic_host": ELASTIC_HOST}
+async def health() -> dict[str, object]:
+    """Liveness + pipeline readiness. Returns 503 until frosty-parse-* are ensured."""
+    global _pipelines_ready
+    if not _pipelines_ready:
+        # Retry ensure so a transient ES outage at boot self-heals without restart.
+        try:
+            manager = get_manager()
+            ensured = await manager.ensure_ingest_pipelines()
+            _pipelines_ready = True
+            logger.info("Ingest pipelines ready (health retry): %s", ", ".join(ensured))
+        except Exception:
+            logger.exception("Ingest pipeline ensure still failing")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "status": "unavailable",
+                    "pipelines_ready": False,
+                    "reason": "frosty-parse ingest pipelines not ensured",
+                },
+            ) from None
+
+    return {
+        "status": "ok",
+        "pipelines_ready": True,
+        "elastic_host": ELASTIC_HOST,
+    }
 
 
 @app.post("/classify", response_model=ClassifyResponse)

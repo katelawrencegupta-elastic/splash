@@ -22,8 +22,10 @@ services:
   logstash:
     build: ./logstash
     container_name: splash-logstash
+    # Bind to loopback by default so host-published ingest is not world-reachable.
+    # For remote Splunk forwarders set INGEST_BIND=0.0.0.0 in .env.
     ports:
-      - "39997:39997"
+      - "${INGEST_BIND:-127.0.0.1}:39997:39997"
     expose:
       - "39996"
     environment:
@@ -45,6 +47,7 @@ services:
       # Canonical rules live in sidecar/; overlay so Logstash and classify stay in sync.
       - ./sidecar/classify_rules.json:/usr/share/logstash/scripts/classify_rules.json:ro
       - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - logstash_data:/usr/share/logstash/data
     depends_on:
       classify:
         condition: service_healthy
@@ -61,7 +64,7 @@ services:
     build: ./s2s
     container_name: splash-s2s-decode
     ports:
-      - "39998:39998"
+      - "${INGEST_BIND:-127.0.0.1}:39998:39998"
     expose:
       - "8081"
     environment:
@@ -85,3 +88,6 @@ services:
       timeout: 5s
       retries: 6
       start_period: 5s
+
+volumes:
+  logstash_data:

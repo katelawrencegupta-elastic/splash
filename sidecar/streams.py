@@ -1,4 +1,4 @@
-"""Ensure ECS data streams exist in Elasticsearch (idempotent, async)."""
+"""Ensure ECS data streams + ingest pipelines exist in Elasticsearch (idempotent, async)."""
 
 from __future__ import annotations
 
@@ -10,10 +10,27 @@ from typing import Any
 
 import httpx
 
+from classify import EventKind, parser_pipeline_name
+
 logger = logging.getLogger(__name__)
 
 # Short timeouts so a slow/unreachable ES cannot stall a whole classify batch.
 _ES_TIMEOUT_S = float(os.environ.get("ELASTIC_HTTP_TIMEOUT_S", "2.0"))
+
+# Empty stub when frosty parsers are not yet installed in the cluster.
+# Existing pipelines are left untouched (GET-then-PUT-if-missing).
+_STUB_INGEST_PIPELINE: dict[str, Any] = {
+    "description": (
+        "Splash-managed stub (no processors). Replace with frosty parsers "
+        "in the cluster when available; Splash will not overwrite an existing pipeline."
+    ),
+    "processors": [],
+}
+
+
+def required_ingest_pipelines() -> list[str]:
+    """Canonical frosty-parse-* names derived from classify rules."""
+    return [parser_pipeline_name(kind) for kind in EventKind]
 
 
 def _coalesce_wait_s(http_steps: int) -> float:
@@ -219,3 +236,45 @@ class DataStreamManager:
             async with self._lock:
                 self._inflight.pop(name, None)
             wait_event.set()
+
+    async def ensure_ingest_pipeline(self, name: str) -> None:
+        """Ensure ingest pipeline ``name`` exists; create an empty stub if missing."""
+        if not name:
+            raise ValueError("ingest pipeline name is required")
+
+        status, body = await self._request("GET", f"/_ingest/pipeline/{name}")
+        if status == 200:
+            logger.debug("Ingest pipeline already present: %s", name)
+            return
+        missing = status == 404
+        if (
+            not missing
+            and status == 400
+            and isinstance(body, dict)
+            and body.get("error", {}).get("type") == "resource_not_found_exception"
+        ):
+            missing = True
+        if not missing:
+            raise RuntimeError(
+                f"ingest pipeline get failed name={name} status={status} body={body}"
+            )
+
+        status, body = await self._request(
+            "PUT",
+            f"/_ingest/pipeline/{name}",
+            json_body=_STUB_INGEST_PIPELINE,
+        )
+        if status not in (200, 201):
+            raise RuntimeError(
+                f"ingest pipeline put failed name={name} status={status} body={body}"
+            )
+        logger.info("Created stub ingest pipeline %s", name)
+
+    async def ensure_ingest_pipelines(
+        self, names: list[str] | None = None
+    ) -> list[str]:
+        """Ensure all required frosty-parse-* pipelines exist. Returns ensured names."""
+        targets = list(names) if names is not None else required_ingest_pipelines()
+        for name in targets:
+            await self.ensure_ingest_pipeline(name)
+        return targets
