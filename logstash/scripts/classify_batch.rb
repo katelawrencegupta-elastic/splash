@@ -514,13 +514,17 @@ def apply_result(event, result)
   namespace = result["namespace"].to_s
   namespace = @namespace if namespace.empty?
 
+  pipeline = result["pipeline_name"].to_s
+  pipeline = pipeline_name_for("generic") if pipeline.empty?
+
   event.set("[@metadata][target_stream]", stream)
+  event.set("[@metadata][pipeline]", pipeline)
   event.set("[event][kind]", kind)
   event.set("[event][dataset]", dataset)
   event.set("[data_stream][type]", "logs")
   event.set("[data_stream][dataset]", dataset)
   event.set("[data_stream][namespace]", namespace)
-  event.set("[splunk][pipeline]", result["pipeline_name"].to_s)
+  event.set("[splunk][pipeline]", pipeline)
   event.set("[splunk][classify_reason]", result["reason"].to_s)
   event.set("[splunk][index]", event.get("splunk_index").to_s)
 
