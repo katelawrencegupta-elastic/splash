@@ -53,7 +53,7 @@ Splunk cooked tcpout :39998
 | Uvicorn `--workers 1` (unified caches) | `sidecar/Dockerfile` `UVICORN_WORKERS` |
 | Async `httpx.AsyncClient` + async ensure/classify | `streams.py`, `app.py` |
 | Parallel stream ensures per batch (semaphore) | `app.py` `ELASTIC_ENSURE_CONCURRENCY` |
-| `flush_ms` flusher thread + tick input | `classify_batch.rb`, `logstash.conf` |
+| `flush_ms` flusher thread + heartbeat tick input | `classify_batch.rb`, `logstash.conf` |
 | Final flush on Logstash shutdown | `classify_batch.rb` `flush(final)` |
 | Per-event isolation in batch classify | `sidecar/app.py` |
 | Metadata classify `@lru_cache` (sidecar message path) | `sidecar/classify.py` |
@@ -75,11 +75,11 @@ Splunk cooked tcpout :39998
 
 ## Remaining Bottlenecks
 
-### Low: Exec tick is 1s resolution
+### Low: Heartbeat tick is 1s resolution
 
-**File:** `logstash/pipeline/logstash.conf`
+**File:** `logstash/pipeline/logstash.conf` — `heartbeat` input (replaced shell `exec` tick).
 
-Idle re-inject of message-path egress can wait up to ~1s.
+Idle re-inject of message-path egress can wait up to ~1s. Sub-second interval is optional if latency matters.
 
 ### Low: S2S decoder copies whole buffer per frame
 
@@ -98,16 +98,16 @@ Empty sourcetype/source events still use `/classify/batch` (intentional).
 | — | Hybrid metadata-local + ensure/batch | High | Fixed |
 | — | HTTP pool + workers=1 + async ES | Medium | Fixed |
 | — | Bounded buffers / coalesce waits / S2S upstream | High | Fixed |
-| 1 | Sub-second idle tick | Low | Open |
+| 1 | Sub-second idle tick | Low | Open (heartbeat @ 1s; was exec) |
 | 2 | S2S decoder buffer copy | Low | Fixed (`memoryview`) |
 
 ## Recommended next steps
 
-1. Optionally replace exec tick with a sub-second heartbeat if idle message-path latency matters
+1. Optionally lower heartbeat `interval` below 1s if idle message-path latency matters
 
 ## Smoke checklist
 
 - Event with `sourcetype=access_combined` → local classify; one `/ensure/batch` then zero sidecar classify HTTP
 - Same stream again → zero HTTP
 - Empty sourcetype/source + access log `message` → `/classify/batch` still used
-- Burst of new streams → concurrent pool connections; no 4× duplicate template ensures
+- Burst of new streams → concurrent pool connections; no 8× duplicate template ensures

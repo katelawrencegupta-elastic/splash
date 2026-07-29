@@ -9,6 +9,9 @@
 nameOverride: ""
 fullnameOverride: ""
 
+# > s2s upstream drain (default 30s) so SIGKILL does not cut off flush.
+terminationGracePeriodSeconds: 40
+
 # If set, skip creating the chart Secret; pods use this Secret name for
 # elastic-api-key and classify-auth-token keys.
 existingSecret: ""

@@ -33,7 +33,7 @@ def register(params)
   @namespace = (params["data_stream_namespace"] || "default").to_s
   @namespace = "default" if @namespace.empty?
   @rules_path = (params["rules_path"] || "/usr/share/logstash/scripts/classify_rules.json").to_s
-  @http_pool_size = (params["http_pool_size"] || 4).to_i
+  @http_pool_size = (params["http_pool_size"] || 8).to_i
   @http_pool_size = 1 if @http_pool_size < 1
   token = (params["classify_auth_token"] || ENV["CLASSIFY_AUTH_TOKEN"] || "").to_s.strip
   @classify_auth_token = token.empty? ? nil : token
@@ -488,7 +488,7 @@ end
 def start_http_client!
   http = Net::HTTP.new(@batch_uri.host, @batch_uri.port)
   http.open_timeout = 5
-  http.read_timeout = 30
+  http.read_timeout = 5
   http.keep_alive_timeout = 60
   http.start
   http
@@ -510,15 +510,24 @@ def restart_http_client!(http)
 end
 
 # Checkout a pooled keep-alive client; on transport failure replace it before return.
+# Always replenish the pool slot (nil-guard restart; never shrink on restart failure).
 def with_http
   http = @http_pool.pop
   begin
     yield http
   rescue StandardError
-    http = restart_http_client!(http)
+    begin
+      http = http.nil? ? start_http_client! : restart_http_client!(http)
+    rescue StandardError
+      http = nil
+    end
     raise
   ensure
-    @http_pool.push(http) if http
+    begin
+      @http_pool.push(http || start_http_client!)
+    rescue StandardError
+      log_error("classify_batch http pool replenish failed")
+    end
   end
 end
 

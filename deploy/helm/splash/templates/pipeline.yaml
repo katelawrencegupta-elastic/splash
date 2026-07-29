@@ -18,6 +18,7 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: pipeline
     spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | int }}
       containers:
         - name: logstash
           image: {{ .Values.pipeline.logstashImage | quote }}

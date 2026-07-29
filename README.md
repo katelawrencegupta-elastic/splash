@@ -127,7 +127,7 @@ Metrics profile: `docker compose --profile metrics up -d` (DLQ exporter `:9102`,
 | `ELASTIC_HTTP_TIMEOUT_S` | `2.0` | Sidecar → ES HTTP timeout |
 | `ELASTIC_ENSURE_CONCURRENCY` | `8` | Max parallel stream ensures per batch |
 | `UVICORN_WORKERS` | `1` | Keep `1` for a single `_ensured`/LRU cache |
-| `CLASSIFY_HTTP_POOL` | `4` | Logstash keep-alive connections to classify |
+| `CLASSIFY_HTTP_POOL` | `8` | Logstash keep-alive connections to classify (read_timeout 5s) |
 | `CLASSIFY_AUTH_TOKEN` | (compose default `splash-dev-classify-token`) | Shared Bearer for Logstash → classify mutating routes |
 | `CLASSIFY_AUTH_DISABLED` | unset | Set `true` only for local scratch (skips Bearer check) |
 | `LS_JAVA_OPTS` | `-Xms1g -Xmx1g` | Logstash heap |
@@ -136,7 +136,7 @@ Metrics profile: `docker compose --profile metrics up -d` (DLQ exporter `:9102`,
 ### Tuning
 
 - Prefer `UVICORN_WORKERS=1` so ensure/classify caches stay in one process.
-- Size `CLASSIFY_HTTP_POOL` near Logstash pipeline worker count (default 4).
+- Size `CLASSIFY_HTTP_POOL` near Logstash pipeline worker count (default 8; classify HTTP read_timeout is 5s).
 - Raise `ELASTIC_ENSURE_CONCURRENCY` only if cold multi-stream batches are slow and ES can take the load.
 
 ## Sidecar API

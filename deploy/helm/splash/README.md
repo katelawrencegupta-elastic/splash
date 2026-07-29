@@ -44,6 +44,7 @@ CPU requests/limits (defaults):
 | logstash | 500m / 1536Mi | 4 / 2Gi |
 
 `pipeline.workers` defaults to **4** (matches Logstash CPU limit).
+Pods use `terminationGracePeriodSeconds: 40` (covers s2s 30s drain).
 
 ## HA / security notes
 

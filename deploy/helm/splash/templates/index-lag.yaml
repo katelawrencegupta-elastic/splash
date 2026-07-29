@@ -18,6 +18,7 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: index-lag
     spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | int }}
       containers:
         - name: index-lag-probe
           image: {{ .Values.indexLagProbe.image | quote }}
