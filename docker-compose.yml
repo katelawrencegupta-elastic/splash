@@ -99,12 +99,38 @@ services:
       DLQ_PATH: "/usr/share/logstash/data/dead_letter_queue"
       LISTEN_PORT: "9102"
     ports:
-      - "${INGEST_BIND:-127.0.0.1}:9102:9102"
+      - "${INGEST_BIND:-127.0.0.1}:${DLQ_EXPORTER_HOST_PORT:-9102}:9102"
     volumes:
       - logstash_data:/usr/share/logstash/data:ro
     depends_on:
       - logstash
     restart: unless-stopped
 
+  # Scrapes Splash /metrics and remote_writes to Elastic Cloud Prometheus API.
+  prometheus:
+    build: ./deploy/prometheus
+    container_name: splash-prometheus
+    profiles: ["metrics"]
+    environment:
+      ELASTIC_HOST: "${ELASTIC_HOST:?ELASTIC_HOST is required}"
+      ELASTIC_API_KEY: "${ELASTIC_API_KEY:-}"
+      # Prefer a metrics-* scoped key; falls back to ELASTIC_API_KEY with a warning.
+      PROMETHEUS_ELASTIC_API_KEY: "${PROMETHEUS_ELASTIC_API_KEY:-}"
+      # Optional override; default is ${ELASTIC_HOST}/_prometheus/api/v1/write
+      PROMETHEUS_REMOTE_WRITE_URL: "${PROMETHEUS_REMOTE_WRITE_URL:-}"
+      SPLASH_SHARD_ID: "${SPLASH_SHARD_ID:-0}"
+    ports:
+      - "${INGEST_BIND:-127.0.0.1}:${PROMETHEUS_HOST_PORT:-9090}:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml.tmpl:ro
+      - ./deploy/alerts/splash-alerts.yaml:/etc/prometheus/rules/splash-alerts.yaml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - s2s-decode
+      - classify
+      - dlq-exporter
+    restart: unless-stopped
+
 volumes:
   logstash_data:
+  prometheus_data:

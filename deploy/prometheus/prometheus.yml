@@ -1,0 +1,49 @@
+# Splash Prometheus — scrape local pipeline metrics and remote_write to Elastic.
+#
+# At container start, docker-entrypoint.sh substitutes:
+#   __REMOTE_WRITE_URL__  from ELASTIC_HOST or PROMETHEUS_REMOTE_WRITE_URL
+#   __SHARD_ID__          from SPLASH_SHARD_ID (default 0)
+# Auth: Authorization ApiKey from /etc/prometheus/secrets/elastic_api_key
+# (PROMETHEUS_ELASTIC_API_KEY preferred; ELASTIC_API_KEY fallback).
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    job_source: splash
+    splash_shard: "__SHARD_ID__"
+
+rule_files:
+  - /etc/prometheus/rules/splash-alerts.yaml
+
+scrape_configs:
+  - job_name: splash-s2s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["s2s-decode:8081"]
+        labels:
+          service: s2s-decode
+
+  - job_name: splash-classify
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["classify:8080"]
+        labels:
+          service: classify
+
+  - job_name: splash-dlq
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["dlq-exporter:9102"]
+        labels:
+          service: dlq-exporter
+
+remote_write:
+  - url: __REMOTE_WRITE_URL__
+    queue_config:
+      max_samples_per_send: 2000
+      capacity: 10000
+      max_shards: 4
+    authorization:
+      type: ApiKey
+      credentials_file: /etc/prometheus/secrets/elastic_api_key

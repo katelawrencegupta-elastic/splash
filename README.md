@@ -96,7 +96,7 @@ Each shard is a full compose project (own classify + logstash + s2s-decode) with
 
 Stride defaults to **10** (`SHARD_PORT_STRIDE`). Point Splunk at all cooked/uncooked ports — see [`splunk/outputs.conf`](splunk/outputs.conf).
 
-Runbooks: [docs/runbooks/sharding.md](docs/runbooks/sharding.md) (VIP, capacity, soak). Kubernetes: [deploy/helm/splash](deploy/helm/splash). Alerts: [deploy/alerts/splash-alerts.yaml](deploy/alerts/splash-alerts.yaml). Metrics profile: `docker compose --profile metrics up -d` (DLQ exporter `:9102`).
+Metrics profile: `docker compose --profile metrics up -d` (DLQ exporter `:9102`, Prometheus `:9090` remote_writing to Elastic). Prefer `PROMETHEUS_ELASTIC_API_KEY` for metrics privileges; shards offset those ports via `run-shard.sh`.
 
 ## Ports
 
@@ -107,6 +107,7 @@ Runbooks: [docs/runbooks/sharding.md](docs/runbooks/sharding.md) (VIP, capacity,
 | 39996 | logstash (internal) | Decoded NDJSON from s2s-decode |
 | 8080 | classify (internal) | Classify / ensure HTTP API |
 | 8081 | s2s-decode (internal) | Health + `/metrics` |
+| 9090 | prometheus (profile `metrics`) | Prometheus UI; remote_writes to Elastic |
 | 9102 | dlq-exporter (profile `metrics`) | DLQ Prometheus `/metrics` |
 
 ## Configuration

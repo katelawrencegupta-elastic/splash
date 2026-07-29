@@ -4,8 +4,10 @@
 # with host ports offset by SHARD_ID so many stacks can share one machine.
 #
 # Port map (default stride 10):
-#   SHARD_ID=0 → uncooked 39997, cooked 39998, classify 8080, s2s health 8081, LS API 9600
-#   SHARD_ID=1 → uncooked 40007, cooked 40008, classify 8090, s2s health 8091, LS API 9610
+#   SHARD_ID=0 → uncooked 39997, cooked 39998, classify 8080, s2s health 8081,
+#                LS API 9600, prometheus 9090, dlq-exporter 9102
+#   SHARD_ID=1 → uncooked 40007, cooked 40008, classify 8090, s2s health 8091,
+#                LS API 9610, prometheus 9100, dlq-exporter 9112
 #
 # Quick start:
 #   ./scripts/run-shard.sh 0 up --build -d
@@ -28,3 +30,13 @@ services:
     ports: !override
       - "${INGEST_BIND:-127.0.0.1}:${COOKED_HOST_PORT:-39998}:39998"
       - "${INGEST_BIND:-127.0.0.1}:${S2S_HEALTH_HOST_PORT:-8081}:8081"
+  dlq-exporter:
+    container_name: !reset null
+    ports: !override
+      - "${INGEST_BIND:-127.0.0.1}:${DLQ_EXPORTER_HOST_PORT:-9102}:9102"
+  prometheus:
+    container_name: !reset null
+    environment:
+      SPLASH_SHARD_ID: "${SPLASH_SHARD_ID:-0}"
+    ports: !override
+      - "${INGEST_BIND:-127.0.0.1}:${PROMETHEUS_HOST_PORT:-9090}:9090"

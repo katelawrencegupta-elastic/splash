@@ -42,7 +42,23 @@ Rules: [deploy/alerts/splash-alerts.yaml](../../deploy/alerts/splash-alerts.yaml
 
 **Status:** Metric `splash_index_lag_seconds` is optional; export from a probe that compares offered eps to ES `_count` delta. Until deployed, use loadtest summaries and Logstash `:9600/_node/stats` bulk metrics.
 
-## Scrape config sketch
+## Scrape + remote_write
+
+Config: [`deploy/prometheus/prometheus.yml`](../../deploy/prometheus/prometheus.yml).
+
+```bash
+docker compose --profile metrics up -d --build
+```
+
+Prometheus scrapes `s2s-decode:8081`, `classify:8080`, and `dlq-exporter:9102`, then **remote_writes** to:
+
+`${ELASTIC_HOST}/_prometheus/api/v1/write`
+
+(same cluster as ingest). Override with `PROMETHEUS_REMOTE_WRITE_URL` if needed.
+
+Auth: prefer `PROMETHEUS_ELASTIC_API_KEY` with **metrics-*** privileges; falls back to `ELASTIC_API_KEY` (logs-only keys often get 403 on remote_write). Whitespace-only host/URL vars fail startup.
+
+Multi-shard: `SPLASH_SHARD_ID` becomes `external_labels.splash_shard`; host ports offset via `run-shard.sh` (`9090`/`9102` + stride). UI on loopback `:9090` (shard 0).
 
 ```yaml
 scrape_configs:
@@ -55,4 +71,7 @@ scrape_configs:
   - job_name: splash-dlq
     static_configs:
       - targets: ["dlq-exporter:9102"]
+
+remote_write:
+  - url: ${ELASTIC_HOST}/_prometheus/api/v1/write   # rendered at container start
 ```
