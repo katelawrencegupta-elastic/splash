@@ -77,6 +77,20 @@ def test_health_unauthenticated_and_no_elastic_host(
     assert body["pipelines_ready"] is True
 
 
+def test_metrics_unauthenticated(auth_client: TestClient) -> None:
+    resp = auth_client.get("/metrics")
+    assert resp.status_code == 200
+    assert "splash_pipelines_ready" in resp.text
+
+
+def test_classify_requires_bearer(auth_client: TestClient) -> None:
+    resp = auth_client.post(
+        "/classify",
+        json={"sourcetype": "access_combined", "source": "", "message": ""},
+    )
+    assert resp.status_code == 401
+
+
 def test_classify_batch_rb_matches_helm_copy() -> None:
     from pathlib import Path
 

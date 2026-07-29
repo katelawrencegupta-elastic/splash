@@ -1,7 +1,8 @@
 http.host: "0.0.0.0"
 xpack.monitoring.enabled: false
-# pipeline.workers omitted: Logstash defaults to available CPU cores ("auto").
-# Explicit "auto" is invalid (must be Integer).
+# Helm templates pipeline.workers from values.pipeline.workers (default 4,
+# matching Logstash CPU limit). This file is the chart source of truth for
+# non-templated keys; workers is injected in templates/configmap.yaml.
 pipeline.batch.size: 500
 # Capture ES output failures (missing pipeline, mapping errors, …) instead of
 # endless retries that back-pressure into Splunk.

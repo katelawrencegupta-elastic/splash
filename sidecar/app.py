@@ -8,11 +8,14 @@ import logging
 import os
 import threading
 from contextlib import asynccontextmanager
-from typing import Annotated, AsyncIterator, Optional
+from typing import AsyncIterator, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
 
 from classify import EventKind, classify_event, data_stream_name, parser_pipeline_name
 from streams import DataStreamManager
@@ -111,23 +114,43 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="splash-classify", version="1.0.0", lifespan=lifespan)
 
+# Paths that stay open for k8s probes / Prometheus (no Bearer).
+_AUTH_SKIP_PATHS = frozenset({"/health", "/metrics"})
 
-def require_mutate_auth(
-    authorization: Annotated[str | None, Header()] = None,
-) -> None:
-    """Bearer token required on mutating routes unless CLASSIFY_AUTH_DISABLED."""
-    if CLASSIFY_AUTH_DISABLED:
-        return
-    if not CLASSIFY_AUTH_TOKEN:
-        raise HTTPException(
-            status_code=503,
-            detail="CLASSIFY_AUTH_TOKEN is not configured",
+
+class ClassifyAuthMiddleware(BaseHTTPMiddleware):
+    """Require Bearer CLASSIFY_AUTH_TOKEN on mutating classify routes."""
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        path = request.url.path.rstrip("/") or "/"
+        # Normalize trailing slash; skip probes/metrics only.
+        if path in _AUTH_SKIP_PATHS or path == "/":
+            return await call_next(request)
+        if CLASSIFY_AUTH_DISABLED:
+            return await call_next(request)
+        if not CLASSIFY_AUTH_TOKEN:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "CLASSIFY_AUTH_TOKEN is not configured"},
+            )
+        authorization = request.headers.get("authorization") or request.headers.get(
+            "Authorization"
         )
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="missing bearer token")
-    provided = authorization[len("Bearer ") :].strip()
-    if not hmac.compare_digest(provided, CLASSIFY_AUTH_TOKEN):
-        raise HTTPException(status_code=401, detail="invalid bearer token")
+        if not authorization or not authorization.startswith("Bearer "):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "missing bearer token"},
+            )
+        provided = authorization[len("Bearer ") :].strip()
+        if not hmac.compare_digest(provided, CLASSIFY_AUTH_TOKEN):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "invalid bearer token"},
+            )
+        return await call_next(request)
+
+
+app.add_middleware(ClassifyAuthMiddleware)
 
 
 class ClassifyRequest(BaseModel):
@@ -391,10 +414,7 @@ def _bump_http(path: str) -> None:
 
 
 @app.post("/classify", response_model=ClassifyResponse)
-async def classify(
-    req: ClassifyRequest,
-    _: None = Depends(require_mutate_auth),
-) -> ClassifyResponse:
+async def classify(req: ClassifyRequest) -> ClassifyResponse:
     _bump_http("/classify")
     try:
         result = _classify_fields(req)
@@ -405,10 +425,7 @@ async def classify(
 
 
 @app.post("/classify/batch", response_model=BatchClassifyResponse)
-async def classify_batch(
-    req: BatchClassifyRequest,
-    _: None = Depends(require_mutate_auth),
-) -> BatchClassifyResponse:
+async def classify_batch(req: BatchClassifyRequest) -> BatchClassifyResponse:
     _bump_http("/classify/batch")
     global _classify_batch_requests, _classify_batch_events
     with _metrics_counters_lock:
@@ -431,10 +448,7 @@ async def classify_batch(
 
 
 @app.post("/ensure/batch", response_model=EnsureBatchResponse)
-async def ensure_batch(
-    req: EnsureBatchRequest,
-    _: None = Depends(require_mutate_auth),
-) -> EnsureBatchResponse:
+async def ensure_batch(req: EnsureBatchRequest) -> EnsureBatchResponse:
     _bump_http("/ensure/batch")
     global _ensure_batch_requests, _ensure_batch_streams
     with _metrics_counters_lock:

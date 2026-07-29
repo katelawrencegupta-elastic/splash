@@ -6,7 +6,12 @@ metadata:
     {{- include "splash.labels" . | nindent 4 }}
 data:
   logstash.yml: |
-{{ .Files.Get "files/logstash.yml" | indent 4 }}
+    http.host: "0.0.0.0"
+    xpack.monitoring.enabled: false
+    pipeline.workers: {{ .Values.pipeline.workers | int }}
+    pipeline.batch.size: 500
+    dead_letter_queue.enable: true
+    dead_letter_queue.max_bytes: 1073741824
   logstash.conf: |
 {{ .Files.Get "files/logstash.conf" | indent 4 }}
   classify_batch.rb: |

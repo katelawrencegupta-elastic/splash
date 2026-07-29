@@ -23,6 +23,14 @@
 {{- end -}}
 {{- end -}}
 
+{{- define "splash.secretName" -}}
+{{- if .Values.existingSecret -}}
+{{- .Values.existingSecret -}}
+{{- else -}}
+{{- printf "%s-credentials" (include "splash.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "splash.labels" -}}
 app.kubernetes.io/name: {{ include "splash.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}

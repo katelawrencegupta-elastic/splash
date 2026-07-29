@@ -1,11 +1,21 @@
 # Capacity: ~0.008–0.009 GB/s (~5k eps @ 1.5KB hot path) per pipeline replica.
 # shards ≈ ceil(target_GBps / 0.008) * 1.25
+#
+# CPU budgets (already applied on pods):
+#   classify  requests 100m/256Mi  limits 1/512Mi
+#   s2s       requests 200m/256Mi  limits 2/1Gi
+#   logstash  requests 500m/1536Mi limits 4/2Gi  (pipeline.workers matches limit)
 
 nameOverride: ""
 fullnameOverride: ""
 
+# If set, skip creating the chart Secret; pods use this Secret name for
+# elastic-api-key and classify-auth-token keys.
+existingSecret: ""
+
 elastic:
   host: ""
+  # Populates Secret key elastic-api-key when existingSecret is empty.
   apiKey: ""
   namespace: default
   httpTimeoutS: "2.0"
@@ -19,6 +29,7 @@ classify:
   image: splash-classify:latest
   imagePullPolicy: IfNotPresent
   # Shared Bearer token for Logstash → classify mutating routes. Required.
+  # Populates Secret key classify-auth-token when existingSecret is empty.
   authToken: ""
   resources:
     requests:
@@ -38,6 +49,8 @@ pipeline:
   logstashImage: splash-logstash:latest
   imagePullPolicy: IfNotPresent
   lsJavaOpts: "-Xms1g -Xmx1g"
+  # Match Logstash CPU limit so workers do not oversubscribe the cgroup.
+  workers: 4
   # Per-pod PVC for DLQ + classify_spill (survives reschedule).
   persistence:
     enabled: true

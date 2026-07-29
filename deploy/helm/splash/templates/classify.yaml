@@ -28,7 +28,15 @@ spec:
             - name: ELASTIC_HOST
               value: {{ required "elastic.host is required" .Values.elastic.host | quote }}
             - name: ELASTIC_API_KEY
-              value: {{ required "elastic.apiKey is required" .Values.elastic.apiKey | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "splash.secretName" . }}
+                  key: elastic-api-key
+            - name: CLASSIFY_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "splash.secretName" . }}
+                  key: classify-auth-token
             - name: DATA_STREAM_NAMESPACE
               value: {{ .Values.elastic.namespace | quote }}
             - name: FROSTY_PIPELINE_MODE
@@ -39,8 +47,6 @@ spec:
               value: {{ .Values.elastic.httpTimeoutS | quote }}
             - name: ELASTIC_ENSURE_CONCURRENCY
               value: {{ .Values.elastic.ensureConcurrency | quote }}
-            - name: CLASSIFY_AUTH_TOKEN
-              value: {{ required "classify.authToken is required" .Values.classify.authToken | quote }}
           readinessProbe:
             httpGet:
               path: /health

@@ -33,11 +33,17 @@ spec:
             - name: ELASTIC_HOST
               value: {{ required "elastic.host is required" .Values.elastic.host | quote }}
             - name: ELASTIC_API_KEY
-              value: {{ required "elastic.apiKey is required" .Values.elastic.apiKey | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "splash.secretName" . }}
+                  key: elastic-api-key
             - name: CLASSIFY_URL
               value: {{ include "splash.classifyUrl" . | quote }}
             - name: CLASSIFY_AUTH_TOKEN
-              value: {{ required "classify.authToken is required" .Values.classify.authToken | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "splash.secretName" . }}
+                  key: classify-auth-token
             - name: DATA_STREAM_NAMESPACE
               value: {{ .Values.elastic.namespace | quote }}
             - name: LS_JAVA_OPTS
@@ -64,6 +70,13 @@ spec:
             initialDelaySeconds: 60
             periodSeconds: 15
             failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /_node/stats
+              port: api
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            failureThreshold: 6
           resources:
             {{- toYaml .Values.pipeline.resources.logstash | nindent 12 }}
         - name: s2s-decode
@@ -93,6 +106,12 @@ spec:
               port: health
             initialDelaySeconds: 5
             periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
           resources:
             {{- toYaml .Values.pipeline.resources.s2s | nindent 12 }}
         {{- if .Values.dlqExporter.enabled }}
@@ -111,6 +130,18 @@ spec:
             - name: ls-data
               mountPath: /usr/share/logstash/data
               readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 30
         {{- end }}
       volumes:
         - name: ls-config

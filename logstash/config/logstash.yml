@@ -1,6 +1,7 @@
 http.host: "0.0.0.0"
 xpack.monitoring.enabled: false
-# pipeline.workers omitted: Logstash defaults to available CPU cores ("auto").
+# pipeline.workers omitted locally: Logstash defaults to available CPU cores.
+# Helm pins pipeline.workers to values.pipeline.workers (default 4 = CPU limit).
 # Explicit "auto" is invalid (must be Integer).
 pipeline.batch.size: 500
 # Capture ES output failures (missing pipeline, mapping errors, …) instead of
