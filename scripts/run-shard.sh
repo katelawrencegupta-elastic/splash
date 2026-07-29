@@ -10,7 +10,8 @@
 #   INGEST_BIND          default 127.0.0.1 (use 0.0.0.0 for remote Splunk)
 #   SHARD_PORT_STRIDE    default 10
 #   COMPOSE_PROJECT_NAME default splash${SHARD_ID}
-#   COOKED_HOST_PORT / UNCOOKED_HOST_PORT  (skip auto offset if both set)
+#   COOKED_HOST_PORT / UNCOOKED_HOST_PORT / CLASSIFY_HOST_PORT /
+#     S2S_HEALTH_HOST_PORT / LS_API_HOST_PORT  (skip auto offset if cooked+uncooked set)
 #   ENV_FILE             default ../.env if present, else .env
 set -euo pipefail
 
@@ -38,6 +39,13 @@ export INGEST_BIND="${INGEST_BIND:-127.0.0.1}"
 if [[ -z "${COOKED_HOST_PORT:-}" || -z "${UNCOOKED_HOST_PORT:-}" ]]; then
   export UNCOOKED_HOST_PORT=$((39997 + SHARD_ID * STRIDE))
   export COOKED_HOST_PORT=$((39998 + SHARD_ID * STRIDE))
+  export CLASSIFY_HOST_PORT=$((8080 + SHARD_ID * STRIDE))
+  export S2S_HEALTH_HOST_PORT=$((8081 + SHARD_ID * STRIDE))
+  export LS_API_HOST_PORT=$((9600 + SHARD_ID * STRIDE))
+else
+  export CLASSIFY_HOST_PORT="${CLASSIFY_HOST_PORT:-$((8080 + SHARD_ID * STRIDE))}"
+  export S2S_HEALTH_HOST_PORT="${S2S_HEALTH_HOST_PORT:-$((8081 + SHARD_ID * STRIDE))}"
+  export LS_API_HOST_PORT="${LS_API_HOST_PORT:-$((9600 + SHARD_ID * STRIDE))}"
 fi
 
 ENV_ARGS=()
@@ -49,7 +57,9 @@ elif [[ -f .env ]]; then
   ENV_ARGS=(--env-file .env)
 fi
 
-echo "shard=${SHARD_ID} project=${COMPOSE_PROJECT_NAME} bind=${INGEST_BIND} uncooked=${UNCOOKED_HOST_PORT} cooked=${COOKED_HOST_PORT}"
+echo "shard=${SHARD_ID} project=${COMPOSE_PROJECT_NAME} bind=${INGEST_BIND}"
+echo "  ingest uncooked=${UNCOOKED_HOST_PORT} cooked=${COOKED_HOST_PORT}"
+echo "  metrics classify=${CLASSIFY_HOST_PORT} s2s=${S2S_HEALTH_HOST_PORT} ls=${LS_API_HOST_PORT}"
 
 docker compose \
   "${ENV_ARGS[@]}" \

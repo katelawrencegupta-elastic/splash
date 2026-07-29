@@ -1,0 +1,7 @@
+{
+  "access_sourcetype": "(access|apache|nginx|iis|httpd|lb)",
+  "syslog_sourcetype": "syslog",
+  "access_source": "(/var/log/(nginx|apache2?|httpd)|access\\.log)",
+  "syslog_source": "/var/log/syslog",
+  "pipeline_name_template": "frosty-parse-{kind}"
+}

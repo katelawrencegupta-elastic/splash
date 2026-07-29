@@ -1,0 +1,66 @@
+# Capacity: ~0.008–0.009 GB/s (~5k eps @ 1.5KB hot path) per pipeline replica.
+# shards ≈ ceil(target_GBps / 0.008) * 1.25
+
+nameOverride: ""
+fullnameOverride: ""
+
+elastic:
+  host: ""
+  apiKey: ""
+  namespace: default
+  httpTimeoutS: "2.0"
+  ensureConcurrency: "8"
+
+# require = production (pipelines must exist). stub = POC only.
+frostyPipelineMode: require
+
+classify:
+  replicaCount: 1
+  image: splash-classify:latest
+  imagePullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  service:
+    type: ClusterIP
+    port: 8080
+
+pipeline:
+  # Each replica is one s2s-decode + Logstash pair (shared network namespace).
+  replicaCount: 2
+  s2sImage: splash-s2s-decode:latest
+  logstashImage: splash-logstash:latest
+  imagePullPolicy: IfNotPresent
+  lsJavaOpts: "-Xms1g -Xmx1g"
+  resources:
+    s2s:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: "2"
+        memory: 1Gi
+    logstash:
+      requests:
+        cpu: 500m
+        memory: 1536Mi
+      limits:
+        cpu: "4"
+        memory: 2Gi
+  service:
+    type: LoadBalancer
+    cookedPort: 39998
+    uncookedPort: 39997
+  upstreamQueueSize: "10000"
+  classifyUrl: "" # default: http://{{ fullname }}-classify:8080
+
+dlqExporter:
+  enabled: true
+  image: splash-dlq-exporter:latest
+  port: 9102
+
+ingestBind: "0.0.0.0"

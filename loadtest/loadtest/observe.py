@@ -25,12 +25,22 @@ def _api_key_header(api_key: str) -> str:
 @dataclass
 class ObserverConfig:
     s2s_health_url: str = "http://127.0.0.1:8081/health"
+    # Comma-separated extra s2s health URLs for multi-shard (aggregated into totals).
+    s2s_health_urls: str = ""
     classify_health_url: str = "http://127.0.0.1:8080/health"
     logstash_stats_url: str = "http://127.0.0.1:9600/_node/stats"
     elastic_host: str = ""
     elastic_api_key: str = ""
     namespace: str = "loadtest"
     interval_s: float = 5.0
+
+    def all_s2s_urls(self) -> list[str]:
+        urls = [self.s2s_health_url]
+        extra = [u.strip() for u in (self.s2s_health_urls or "").split(",") if u.strip()]
+        for u in extra:
+            if u not in urls:
+                urls.append(u)
+        return urls
 
 
 @dataclass
@@ -89,14 +99,31 @@ class Observer:
             return None
 
     async def sample(self, *, gen: dict[str, Any] | None = None) -> dict[str, Any]:
-        s2s = await self._get_json(self.config.s2s_health_url)
+        s2s_urls = self.config.all_s2s_urls()
+        s2s_bodies = [await self._get_json(u) for u in s2s_urls]
         classify = await self._get_json(self.config.classify_health_url)
         ls = await self._get_json(self.config.logstash_stats_url)
         es_count = await self._es_count()
 
-        s2s_stats = (s2s or {}).get("stats") if isinstance(s2s, dict) else None
-        if not isinstance(s2s_stats, dict):
-            s2s_stats = {}
+        emitted = 0
+        bytes_consumed = 0
+        frames_ok = 0
+        queue_sum = 0
+        queue_max = 0
+        s2s_errors: list[str] = []
+        for body in s2s_bodies:
+            if not isinstance(body, dict):
+                continue
+            if body.get("_error") is not None:
+                s2s_errors.append(str(body.get("_error")))
+                continue
+            st = body.get("stats") if isinstance(body.get("stats"), dict) else {}
+            emitted += int(st.get("events_emitted") or 0)
+            bytes_consumed += int(st.get("bytes_consumed") or 0)
+            frames_ok += int(st.get("frames_ok") or 0)
+            q = int(st.get("upstream_queue") or 0)
+            queue_sum += q
+            queue_max = max(queue_max, q)
 
         events_in = events_out = None
         if isinstance(ls, dict) and "_error" not in ls:
@@ -119,17 +146,19 @@ class Observer:
             "gen_sent_bytes": (gen or {}).get("sent_bytes"),
             "gen_eps": (gen or {}).get("eps"),
             "gen_errors": (gen or {}).get("errors"),
-            "s2s_events_emitted": s2s_stats.get("events_emitted"),
-            "s2s_bytes_consumed": s2s_stats.get("bytes_consumed"),
-            "s2s_upstream_queue": s2s_stats.get("upstream_queue"),
-            "s2s_frames_ok": s2s_stats.get("frames_ok"),
+            "s2s_shard_count": len(s2s_urls),
+            "s2s_events_emitted": emitted,
+            "s2s_bytes_consumed": bytes_consumed,
+            "s2s_upstream_queue": queue_sum,
+            "s2s_upstream_queue_max": queue_max,
+            "s2s_frames_ok": frames_ok,
             "classify_ok": isinstance(classify, dict) and classify.get("status") == "ok",
             "classify_pipelines_ready": isinstance(classify, dict)
             and classify.get("pipelines_ready") is True,
             "ls_events_in": events_in,
             "ls_events_out": events_out,
             "es_count": es_count,
-            "s2s_error": (s2s or {}).get("_error") if isinstance(s2s, dict) else None,
+            "s2s_error": ";".join(s2s_errors) if s2s_errors else None,
             "ls_error": (ls or {}).get("_error") if isinstance(ls, dict) else None,
         }
         self.rows.append(row)

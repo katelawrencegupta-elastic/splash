@@ -67,7 +67,12 @@ docker compose up --build -d
 
 Ingest ports bind to `127.0.0.1` by default (`INGEST_BIND`). For remote forwarders set `INGEST_BIND=0.0.0.0` in `.env`.
 
-At startup, classify ensures `frosty-parse-access-log`, `frosty-parse-syslog`, and `frosty-parse-generic` exist (creates empty stubs if missing; never overwrites existing pipelines). `/health` stays 503 until that succeeds. Logstash DLQ captures residual ES output failures.
+At startup, classify ensures `frosty-parse-access-log`, `frosty-parse-syslog`, and `frosty-parse-generic` exist. Mode is controlled by `FROSTY_PIPELINE_MODE`:
+
+- `stub` (compose default): create empty stubs if missing (POC/loadtest).
+- `require` (Helm/production default): fail `/health` until real frosty pipelines exist; never PUT stubs.
+
+Logstash DLQ captures residual ES output failures. See [docs/runbooks/](docs/runbooks/).
 
 ## Horizontal scaling (shards)
 
@@ -80,20 +85,18 @@ Each shard is a full compose project (own classify + logstash + s2s-decode) with
 # Shard 1 → :40007 / :40008
 ./scripts/run-shard.sh 1 up --build -d
 
-# Status / tear down
 ./scripts/run-shard.sh 0 ps
 ./scripts/run-shard.sh 1 down
 ```
 
-| `SHARD_ID` | Uncooked host port | Cooked host port |
-|------------|--------------------|------------------|
+| `SHARD_ID` | Uncooked | Cooked |
+|------------|----------|--------|
 | 0 | 39997 | 39998 |
 | 1 | 40007 | 40008 |
-| 2 | 40017 | 40018 |
 
-Stride defaults to **10** (`SHARD_PORT_STRIDE`). Overlay: [`docker-compose.shard.yml`](docker-compose.shard.yml). Point Splunk at all cooked (or uncooked) ports — see multi-server examples in [`splunk/outputs.conf`](splunk/outputs.conf).
+Stride defaults to **10** (`SHARD_PORT_STRIDE`). Point Splunk at all cooked/uncooked ports — see [`splunk/outputs.conf`](splunk/outputs.conf).
 
-For remote forwarders: `INGEST_BIND=0.0.0.0 ./scripts/run-shard.sh N up -d`.
+Runbooks: [docs/runbooks/sharding.md](docs/runbooks/sharding.md) (VIP, capacity, soak). Kubernetes: [deploy/helm/splash](deploy/helm/splash). Alerts: [deploy/alerts/splash-alerts.yaml](deploy/alerts/splash-alerts.yaml). Metrics profile: `docker compose --profile metrics up -d` (DLQ exporter `:9102`).
 
 ## Ports
 
@@ -103,7 +106,8 @@ For remote forwarders: `INGEST_BIND=0.0.0.0 ./scripts/run-shard.sh N up -d`.
 | 39997 | logstash | Uncooked TCP |
 | 39996 | logstash (internal) | Decoded NDJSON from s2s-decode |
 | 8080 | classify (internal) | Classify / ensure HTTP API |
-| 8081 | s2s-decode (internal) | Health + stats |
+| 8081 | s2s-decode (internal) | Health + `/metrics` |
+| 9102 | dlq-exporter (profile `metrics`) | DLQ Prometheus `/metrics` |
 
 ## Configuration
 
@@ -112,6 +116,7 @@ For remote forwarders: `INGEST_BIND=0.0.0.0 ./scripts/run-shard.sh N up -d`.
 | `ELASTIC_HOST` | _(required)_ | Elasticsearch / Elastic Cloud URL |
 | `ELASTIC_API_KEY` | _(required)_ | ApiKey (`id:secret` or base64) |
 | `INGEST_BIND` | `127.0.0.1` | Host bind for published `:39997`/`:39998` |
+| `FROSTY_PIPELINE_MODE` | `stub` (compose) / `require` (Helm) | `require` = pipelines must exist; `stub` = create empty |
 | `DATA_STREAM_NAMESPACE` | `default` | ECS namespace segment |
 | `CLASSIFY_BATCH_SIZE` | `100` | Message-path batch size |
 | `CLASSIFY_FLUSH_MS` | `200` | Message-path flush interval |

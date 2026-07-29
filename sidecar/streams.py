@@ -17,7 +17,14 @@ logger = logging.getLogger(__name__)
 # Short timeouts so a slow/unreachable ES cannot stall a whole classify batch.
 _ES_TIMEOUT_S = float(os.environ.get("ELASTIC_HTTP_TIMEOUT_S", "2.0"))
 
-# Empty stub when frosty parsers are not yet installed in the cluster.
+# require = pipelines must already exist (production). stub = create empty stubs (POC).
+FROSTY_PIPELINE_MODE = os.environ.get("FROSTY_PIPELINE_MODE", "require").strip().lower()
+if FROSTY_PIPELINE_MODE not in {"require", "stub"}:
+    raise ValueError(
+        f"FROSTY_PIPELINE_MODE must be 'require' or 'stub', got {FROSTY_PIPELINE_MODE!r}"
+    )
+
+# Empty stub when frosty parsers are not yet installed (stub mode only).
 # Existing pipelines are left untouched (GET-then-PUT-if-missing).
 _STUB_INGEST_PIPELINE: dict[str, Any] = {
     "description": (
@@ -101,7 +108,13 @@ class DataStreamManager:
     coalesce on an in-flight asyncio.Event so only one PUT is issued.
     """
 
-    def __init__(self, elastic_host: str, api_key: str) -> None:
+    def __init__(
+        self,
+        elastic_host: str,
+        api_key: str,
+        *,
+        frosty_pipeline_mode: str | None = None,
+    ) -> None:
         self._host = elastic_host.rstrip("/")
         self._headers = {
             "Authorization": f"ApiKey {_api_key_header(api_key)}",
@@ -114,6 +127,10 @@ class DataStreamManager:
         self._template_ready = False
         self._template_event: asyncio.Event | None = None
         self._inflight: dict[str, asyncio.Event] = {}
+        mode = (frosty_pipeline_mode or FROSTY_PIPELINE_MODE).strip().lower()
+        if mode not in {"require", "stub"}:
+            raise ValueError(f"frosty_pipeline_mode must be require|stub, got {mode!r}")
+        self._frosty_pipeline_mode = mode
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -238,7 +255,11 @@ class DataStreamManager:
             wait_event.set()
 
     async def ensure_ingest_pipeline(self, name: str) -> None:
-        """Ensure ingest pipeline ``name`` exists; create an empty stub if missing."""
+        """Ensure ingest pipeline ``name`` exists.
+
+        - require mode: GET must succeed; missing pipelines raise (no stubs).
+        - stub mode: create an empty stub if missing; never overwrite existing.
+        """
         if not name:
             raise ValueError("ingest pipeline name is required")
 
@@ -257,6 +278,12 @@ class DataStreamManager:
         if not missing:
             raise RuntimeError(
                 f"ingest pipeline get failed name={name} status={status} body={body}"
+            )
+
+        if self._frosty_pipeline_mode == "require":
+            raise RuntimeError(
+                f"ingest pipeline missing name={name} "
+                f"(FROSTY_PIPELINE_MODE=require; install frosty-parse-* in the cluster)"
             )
 
         status, body = await self._request(

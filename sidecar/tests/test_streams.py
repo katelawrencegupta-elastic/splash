@@ -17,7 +17,9 @@ async def manager() -> DataStreamManager:
         client.request = AsyncMock()
         client.aclose = AsyncMock()
         client_cls.return_value = client
-        mgr = DataStreamManager("https://es.example", "id:secret")
+        mgr = DataStreamManager(
+            "https://es.example", "id:secret", frosty_pipeline_mode="stub"
+        )
         mgr._client = client
         yield mgr
         await mgr.close()
@@ -147,6 +149,23 @@ async def test_ensure_ingest_pipeline_creates_stub_when_missing(
     assert methods == ["GET", "PUT"]
     put_kwargs = manager._client.request.await_args_list[1].kwargs
     assert put_kwargs["json"]["processors"] == []
+
+
+@pytest.mark.asyncio
+async def test_ensure_ingest_pipeline_require_mode_fails_when_missing() -> None:
+    with patch("streams.httpx.AsyncClient") as client_cls:
+        client = MagicMock()
+        client.request = AsyncMock(side_effect=[_missing_pipeline_resp()])
+        client.aclose = AsyncMock()
+        client_cls.return_value = client
+        mgr = DataStreamManager(
+            "https://es.example", "id:secret", frosty_pipeline_mode="require"
+        )
+        mgr._client = client
+        with pytest.raises(RuntimeError, match="FROSTY_PIPELINE_MODE=require"):
+            await mgr.ensure_ingest_pipeline("frosty-parse-generic")
+        assert mgr._client.request.await_count == 1
+        await mgr.close()
 
 
 @pytest.mark.asyncio

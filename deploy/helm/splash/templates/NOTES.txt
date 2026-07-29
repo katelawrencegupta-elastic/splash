@@ -1,0 +1,24 @@
+1. Splash is installed as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+2. Capacity: plan ~0.008–0.009 GB/s (~5k eps) per pipeline replica
+   (replicaCount={{ .Values.pipeline.replicaCount }}).
+
+3. Point Splunk cooked tcpout at the ingest Service VIP:
+
+     server = <{{ include "splash.fullname" . }}-ingest EXTERNAL-IP or hostname>:{{ .Values.pipeline.service.cookedPort }}
+
+   Uncooked (optional):
+
+     server = <same VIP>:{{ .Values.pipeline.service.uncookedPort }}
+
+4. Frosty mode: {{ .Values.frostyPipelineMode }}
+   - require: install frosty-parse-access-log, frosty-parse-syslog, frosty-parse-generic in ES
+   - stub: POC only
+
+5. Metrics:
+   - classify: http://{{ include "splash.fullname" . }}-classify:{{ .Values.classify.service.port }}/metrics
+   - s2s:     http://<pipeline-pod>:8081/metrics
+   - dlq:     http://<pipeline-pod>:{{ .Values.dlqExporter.port }}/metrics (if enabled)
+
+6. Alerts: deploy/alerts/splash-alerts.yaml
+   Runbooks: docs/runbooks/

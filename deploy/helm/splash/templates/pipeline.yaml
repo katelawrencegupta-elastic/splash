@@ -1,0 +1,145 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "splash.fullname" . }}-pipeline
+  labels:
+    {{- include "splash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pipeline
+spec:
+  replicas: {{ .Values.pipeline.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: pipeline
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: pipeline
+    spec:
+      containers:
+        - name: logstash
+          image: {{ .Values.pipeline.logstashImage | quote }}
+          imagePullPolicy: {{ .Values.pipeline.imagePullPolicy }}
+          ports:
+            - name: uncooked
+              containerPort: 39997
+            - name: decoded
+              containerPort: 39996
+            - name: api
+              containerPort: 9600
+          env:
+            - name: ELASTIC_HOST
+              value: {{ required "elastic.host is required" .Values.elastic.host | quote }}
+            - name: ELASTIC_API_KEY
+              value: {{ required "elastic.apiKey is required" .Values.elastic.apiKey | quote }}
+            - name: CLASSIFY_URL
+              value: {{ include "splash.classifyUrl" . | quote }}
+            - name: DATA_STREAM_NAMESPACE
+              value: {{ .Values.elastic.namespace | quote }}
+            - name: LS_JAVA_OPTS
+              value: {{ .Values.pipeline.lsJavaOpts | quote }}
+          volumeMounts:
+            - name: ls-data
+              mountPath: /usr/share/logstash/data
+            - name: ls-config
+              mountPath: /usr/share/logstash/config/logstash.yml
+              subPath: logstash.yml
+            - name: ls-config
+              mountPath: /usr/share/logstash/pipeline/logstash.conf
+              subPath: logstash.conf
+            - name: ls-config
+              mountPath: /usr/share/logstash/scripts/classify_batch.rb
+              subPath: classify_batch.rb
+            - name: ls-config
+              mountPath: /usr/share/logstash/scripts/classify_rules.json
+              subPath: classify_rules.json
+          readinessProbe:
+            httpGet:
+              path: /_node/stats
+              port: api
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 12
+          resources:
+            {{- toYaml .Values.pipeline.resources.logstash | nindent 12 }}
+        - name: s2s-decode
+          image: {{ .Values.pipeline.s2sImage | quote }}
+          imagePullPolicy: {{ .Values.pipeline.imagePullPolicy }}
+          ports:
+            - name: cooked
+              containerPort: 39998
+            - name: health
+              containerPort: 8081
+          env:
+            - name: S2S_LISTEN_HOST
+              value: {{ .Values.ingestBind | quote }}
+            - name: S2S_LISTEN_PORT
+              value: "39998"
+            - name: LOGSTASH_HOST
+              value: "127.0.0.1"
+            - name: LOGSTASH_DECODED_PORT
+              value: "39996"
+            - name: S2S_HEALTH_PORT
+              value: "8081"
+            - name: S2S_UPSTREAM_QUEUE_SIZE
+              value: {{ .Values.pipeline.upstreamQueueSize | quote }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.pipeline.resources.s2s | nindent 12 }}
+        {{- if .Values.dlqExporter.enabled }}
+        - name: dlq-exporter
+          image: {{ .Values.dlqExporter.image | quote }}
+          imagePullPolicy: {{ .Values.pipeline.imagePullPolicy }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.dlqExporter.port }}
+          env:
+            - name: DLQ_PATH
+              value: /usr/share/logstash/data/dead_letter_queue
+            - name: LISTEN_PORT
+              value: {{ .Values.dlqExporter.port | quote }}
+          volumeMounts:
+            - name: ls-data
+              mountPath: /usr/share/logstash/data
+              readOnly: true
+        {{- end }}
+      volumes:
+        - name: ls-data
+          emptyDir: {}
+        - name: ls-config
+          configMap:
+            name: {{ include "splash.fullname" . }}-logstash-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "splash.fullname" . }}-ingest
+  labels:
+    {{- include "splash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pipeline
+spec:
+  type: {{ .Values.pipeline.service.type }}
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: pipeline
+  ports:
+    - name: cooked
+      port: {{ .Values.pipeline.service.cookedPort }}
+      targetPort: cooked
+    - name: uncooked
+      port: {{ .Values.pipeline.service.uncookedPort }}
+      targetPort: uncooked
+    - name: s2s-health
+      port: 8081
+      targetPort: health
+    {{- if .Values.dlqExporter.enabled }}
+    - name: dlq-metrics
+      port: {{ .Values.dlqExporter.port }}
+      targetPort: metrics
+    {{- end }}

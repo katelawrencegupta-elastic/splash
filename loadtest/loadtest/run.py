@@ -70,7 +70,21 @@ def _merge_settings(
     )
     if args.namespace:
         settings["namespace"] = args.namespace
+    if getattr(args, "cooked_ports", None):
+        settings["cooked_ports"] = args.cooked_ports
+    if getattr(args, "s2s_health_urls", None):
+        settings["s2s_health_urls"] = args.s2s_health_urls
     return settings
+
+
+def _parse_ports(raw: str | int | list | None, default: int) -> list[int]:
+    if raw is None or raw == "":
+        return [default]
+    if isinstance(raw, int):
+        return [raw]
+    if isinstance(raw, list):
+        return [int(x) for x in raw]
+    return [int(p.strip()) for p in str(raw).split(",") if p.strip()]
 
 
 async def _observe_loop(
@@ -82,10 +96,11 @@ async def _observe_loop(
     while not stop.is_set():
         row = await observer.sample(gen=stats.snapshot())
         logger.info(
-            "t=%.0fs eps=%.0f queue=%s classify_ok=%s es_count=%s",
+            "t=%.0fs eps=%.0f queue_sum=%s queue_max=%s classify_ok=%s es_count=%s",
             row.get("t_mono") or 0,
             float(row.get("gen_eps") or 0),
             row.get("s2s_upstream_queue"),
+            row.get("s2s_upstream_queue_max"),
             row.get("classify_ok"),
             row.get("es_count"),
         )
@@ -114,12 +129,41 @@ async def _run_phase(
     interval_s = float(settings.get("observe_interval_s", 5.0))
     stats = GenStats()
 
+    cooked_ports = _parse_ports(
+        settings.get("cooked_ports") or settings.get("cooked_port"), 39998
+    )
+    uncooked_ports = _parse_ports(
+        settings.get("uncooked_ports") or settings.get("uncooked_port"), 39997
+    )
+    host = str(settings.get("cooked_host") or settings.get("uncooked_host") or "127.0.0.1")
+
     stop_gen = asyncio.Event()
     stop_obs = asyncio.Event()
     metrics_csv = out_dir / f"metrics_{phase}.csv"
 
+    s2s_urls = str(settings.get("s2s_health_urls") or "")
+    if not s2s_urls and len(cooked_ports) > 1:
+        # Default shard health map: stride 10 from base 8081.
+        base = 8081
+        stride = 10
+        s2s_urls = ",".join(
+            f"http://127.0.0.1:{base + i * stride}/health"
+            for i in range(len(cooked_ports))
+        )
+
+    primary_s2s = (s2s_urls.split(",")[0].strip() if s2s_urls else "") or str(
+        settings.get("s2s_health_url") or "http://127.0.0.1:8081/health"
+    )
+    extra_s2s = ""
+    if s2s_urls:
+        parts = [u.strip() for u in s2s_urls.split(",") if u.strip()]
+        if parts:
+            primary_s2s = parts[0]
+            extra_s2s = ",".join(parts[1:])
+
     obs_cfg = ObserverConfig(
-        s2s_health_url=str(settings.get("s2s_health_url")),
+        s2s_health_url=primary_s2s,
+        s2s_health_urls=extra_s2s,
         classify_health_url=str(settings.get("classify_health_url")),
         logstash_stats_url=str(settings.get("logstash_stats_url")),
         elastic_host=str(settings.get("elastic_host") or ""),
@@ -128,14 +172,21 @@ async def _run_phase(
         interval_s=interval_s,
     )
 
+    targets = cooked_ports if path == "cooked" else uncooked_ports
+    eps_each = eps / max(len(targets), 1)
+    conns_each = max(1, connections // max(len(targets), 1))
+
     logger.info(
-        "phase=%s path=%s eps=%.0f duration=%.0fs hot_fraction=%.2f connections=%d",
+        "phase=%s path=%s total_eps=%.0f eps/shard=%.0f duration=%.0fs "
+        "hot_fraction=%.2f targets=%s connections/shard=%d",
         phase,
         path,
         eps,
+        eps_each,
         duration_s,
         hot_fraction,
-        connections,
+        targets,
+        conns_each,
     )
 
     async with Observer(obs_cfg, metrics_csv) as observer:
@@ -144,30 +195,43 @@ async def _run_phase(
             name=f"observe-{phase}",
         )
         try:
-            if path == "cooked":
-                await run_cooked(
-                    host=str(settings.get("cooked_host", "127.0.0.1")),
-                    port=int(settings.get("cooked_port", 39998)),
-                    eps=eps,
-                    duration_s=duration_s,
-                    connections=connections,
-                    hot_fraction=hot_fraction,
-                    event_bytes=event_bytes,
-                    stats=stats,
-                    stop=stop_gen,
-                )
-            else:
-                await run_uncooked(
-                    host=str(settings.get("uncooked_host", "127.0.0.1")),
-                    port=int(settings.get("uncooked_port", 39997)),
-                    eps=eps,
-                    duration_s=duration_s,
-                    connections=connections,
-                    hot_fraction=hot_fraction,
-                    event_bytes=event_bytes,
-                    stats=stats,
-                    stop=stop_gen,
-                )
+            gen_tasks = []
+            for port in targets:
+                if path == "cooked":
+                    gen_tasks.append(
+                        asyncio.create_task(
+                            run_cooked(
+                                host=host,
+                                port=port,
+                                eps=eps_each,
+                                duration_s=duration_s,
+                                connections=conns_each,
+                                hot_fraction=hot_fraction,
+                                event_bytes=event_bytes,
+                                stats=stats,
+                                stop=stop_gen,
+                            ),
+                            name=f"cooked-{port}",
+                        )
+                    )
+                else:
+                    gen_tasks.append(
+                        asyncio.create_task(
+                            run_uncooked(
+                                host=str(settings.get("uncooked_host", host)),
+                                port=port,
+                                eps=eps_each,
+                                duration_s=duration_s,
+                                connections=conns_each,
+                                hot_fraction=hot_fraction,
+                                event_bytes=event_bytes,
+                                stats=stats,
+                                stop=stop_gen,
+                            ),
+                            name=f"uncooked-{port}",
+                        )
+                    )
+            await asyncio.gather(*gen_tasks)
         finally:
             stop_gen.set()
             stop_obs.set()
@@ -299,6 +363,16 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--run-id", default=None)
     run.add_argument("--skip-warm", action="store_true")
     run.add_argument("--skip-burst", action="store_true")
+    run.add_argument(
+        "--cooked-ports",
+        default=None,
+        help="Comma-separated cooked S2S ports for multi-shard (e.g. 39998,40008)",
+    )
+    run.add_argument(
+        "--s2s-health-urls",
+        default=None,
+        help="Comma-separated s2s /health URLs (default derived from shard stride)",
+    )
     run.add_argument(
         "--steady-only",
         action="store_true",

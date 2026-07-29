@@ -1,0 +1,57 @@
+# Prometheus / Alertmanager rules for Splash
+#
+# Load with PrometheusRule (kube-prometheus) or as a classic rules file.
+# Metric names match /metrics on s2s-decode (:8081), classify (:8080),
+# and dlq_exporter (:9102).
+
+groups:
+  - name: splash
+    rules:
+      - alert: SplashS2SQueuePegged
+        expr: splash_s2s_upstream_queue > 9000
+        for: 2m
+        labels:
+          severity: critical
+          service: splash
+        annotations:
+          summary: "Splash s2s-decode upstream queue pegged"
+          description: >-
+            upstream_queue={{ $value }} on {{ $labels.instance }}.
+            Logstash/ES is behind; Splunk will back-pressure. See docs/runbooks/alerting.md.
+
+      - alert: SplashClassifyNotReady
+        expr: splash_pipelines_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: splash
+        annotations:
+          summary: "Splash classify frosty pipelines not ready"
+          description: >-
+            pipelines_ready=0 on {{ $labels.instance }}.
+            Install frosty-parse-* or set FROSTY_PIPELINE_MODE=stub for POC only.
+
+      - alert: SplashDLQGrowing
+        expr: delta(splash_dlq_bytes_total[15m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+          service: splash
+        annotations:
+          summary: "Splash Logstash DLQ is growing"
+          description: >-
+            DLQ bytes increased over 15m on {{ $labels.instance }}.
+            Investigate ES bulk failures; see docs/runbooks/dlq.md.
+
+      - alert: SplashIndexLagHigh
+        expr: splash_index_lag_seconds > 60
+        for: 10m
+        labels:
+          severity: warning
+          service: splash
+        annotations:
+          summary: "Splash index lag high"
+          description: >-
+            Index lag {{ $value }}s on {{ $labels.instance }}.
+            Requires an external probe exporting splash_index_lag_seconds;
+            until that probe exists, use loadtest ES _count vs sent and LS bulk latency.

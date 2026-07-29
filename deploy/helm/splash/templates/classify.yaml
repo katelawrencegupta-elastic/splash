@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "splash.fullname" . }}-classify
+  labels:
+    {{- include "splash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: classify
+spec:
+  replicas: {{ .Values.classify.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: classify
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: classify
+    spec:
+      containers:
+        - name: classify
+          image: {{ .Values.classify.image | quote }}
+          imagePullPolicy: {{ .Values.classify.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ELASTIC_HOST
+              value: {{ required "elastic.host is required" .Values.elastic.host | quote }}
+            - name: ELASTIC_API_KEY
+              value: {{ required "elastic.apiKey is required" .Values.elastic.apiKey | quote }}
+            - name: DATA_STREAM_NAMESPACE
+              value: {{ .Values.elastic.namespace | quote }}
+            - name: FROSTY_PIPELINE_MODE
+              value: {{ .Values.frostyPipelineMode | quote }}
+            - name: UVICORN_WORKERS
+              value: "1"
+            - name: ELASTIC_HTTP_TIMEOUT_S
+              value: {{ .Values.elastic.httpTimeoutS | quote }}
+            - name: ELASTIC_ENSURE_CONCURRENCY
+              value: {{ .Values.elastic.ensureConcurrency | quote }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.classify.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "splash.fullname" . }}-classify
+  labels:
+    {{- include "splash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: classify
+spec:
+  type: {{ .Values.classify.service.type }}
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: classify
+  ports:
+    - name: http
+      port: {{ .Values.classify.service.port }}
+      targetPort: http

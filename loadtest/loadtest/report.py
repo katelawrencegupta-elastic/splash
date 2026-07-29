@@ -30,7 +30,9 @@ def summarize(
         with metrics_csv.open(encoding="utf-8") as fh:
             rows = list(csv.DictReader(fh))
 
-    queue_vals = [v for r in rows if (v := _f(r, "s2s_upstream_queue")) is not None]
+    queue_vals = [v for r in rows if (v := _f(r, "s2s_upstream_queue_max")) is not None]
+    if not queue_vals:
+        queue_vals = [v for r in rows if (v := _f(r, "s2s_upstream_queue")) is not None]
     eps_vals = [v for r in rows if (v := _f(r, "gen_eps")) is not None]
     es_first = _f(rows[0], "es_count") if rows else None
     es_last = _f(rows[-1], "es_count") if rows else None

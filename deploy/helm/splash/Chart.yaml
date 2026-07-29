@@ -1,0 +1,6 @@
+apiVersion: v2
+name: splash
+description: Splunk → Elasticsearch ingest bridge (classify + s2s-decode + Logstash)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

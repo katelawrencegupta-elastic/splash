@@ -29,6 +29,18 @@ scenarios:
     hot_fraction: 1.0
     target_eps: 5000
 
+  S1x2:
+    name: hot_cooked_2shard
+    description: Hot cooked across two shards (ports 39998+40008) — ~2× stable
+    path: cooked
+    hot_fraction: 1.0
+    target_eps: 10000
+    cooked_ports: "39998,40008"
+    s2s_health_urls: "http://127.0.0.1:8081/health,http://127.0.0.1:8091/health"
+    classify_health_url: "http://127.0.0.1:8080/health"
+    logstash_stats_url: "http://127.0.0.1:9600/_node/stats"
+    connections: 16
+
   S2:
     name: cold_cooked
     description: Empty sourcetype/source — /classify/batch path

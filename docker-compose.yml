@@ -6,6 +6,7 @@ services:
       ELASTIC_HOST: "${ELASTIC_HOST:?ELASTIC_HOST is required}"
       ELASTIC_API_KEY: "${ELASTIC_API_KEY:?ELASTIC_API_KEY is required}"
       DATA_STREAM_NAMESPACE: "${DATA_STREAM_NAMESPACE:-default}"
+      FROSTY_PIPELINE_MODE: "${FROSTY_PIPELINE_MODE:-stub}"
       UVICORN_WORKERS: "${UVICORN_WORKERS:-1}"
       ELASTIC_HTTP_TIMEOUT_S: "${ELASTIC_HTTP_TIMEOUT_S:-2.0}"
       ELASTIC_ENSURE_CONCURRENCY: "${ELASTIC_ENSURE_CONCURRENCY:-8}"
@@ -88,6 +89,22 @@ services:
       timeout: 5s
       retries: 6
       start_period: 5s
+
+  # Optional Prometheus scrape for Logstash DLQ depth (same volume as logstash).
+  dlq-exporter:
+    build: ./deploy/dlq_exporter
+    container_name: splash-dlq-exporter
+    profiles: ["metrics"]
+    environment:
+      DLQ_PATH: "/usr/share/logstash/data/dead_letter_queue"
+      LISTEN_PORT: "9102"
+    ports:
+      - "${INGEST_BIND:-127.0.0.1}:9102:9102"
+    volumes:
+      - logstash_data:/usr/share/logstash/data:ro
+    depends_on:
+      - logstash
+    restart: unless-stopped
 
 volumes:
   logstash_data:

@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from classify import EventKind, classify_event, data_stream_name, parser_pipeline_name
@@ -28,10 +29,13 @@ DATA_STREAM_NAMESPACE = os.environ.get("DATA_STREAM_NAMESPACE", "default")
 ELASTIC_ENSURE_CONCURRENCY = max(
     1, int(os.environ.get("ELASTIC_ENSURE_CONCURRENCY", "8"))
 )
+FROSTY_PIPELINE_MODE = os.environ.get("FROSTY_PIPELINE_MODE", "require").strip().lower()
 
 _manager: Optional[DataStreamManager] = None
 _manager_lock = threading.Lock()
 _pipelines_ready = False
+_ensure_failures = 0
+_ensure_failures_lock = threading.Lock()
 
 
 def get_manager() -> DataStreamManager:
@@ -45,8 +49,16 @@ def get_manager() -> DataStreamManager:
                 raise HTTPException(status_code=500, detail="ELASTIC_HOST is not set")
             if not ELASTIC_API_KEY:
                 raise HTTPException(status_code=500, detail="ELASTIC_API_KEY is not set")
-            _manager = DataStreamManager(ELASTIC_HOST, ELASTIC_API_KEY)
-            logger.info("DataStreamManager initialized for %s", ELASTIC_HOST)
+            _manager = DataStreamManager(
+                ELASTIC_HOST,
+                ELASTIC_API_KEY,
+                frosty_pipeline_mode=FROSTY_PIPELINE_MODE,
+            )
+            logger.info(
+                "DataStreamManager initialized for %s frosty_mode=%s",
+                ELASTIC_HOST,
+                FROSTY_PIPELINE_MODE,
+            )
         return _manager
 
 
@@ -169,10 +181,13 @@ def _classify_fields(req: ClassifyRequest) -> ClassifyResponse:
 
 
 async def _ensure_one(manager: DataStreamManager, stream: str) -> bool:
+    global _ensure_failures
     try:
         await manager.ensure_data_stream(stream)
         return True
     except Exception:
+        with _ensure_failures_lock:
+            _ensure_failures += 1
         logger.exception("Failed to ensure data stream %s; falling back", stream)
         return False
 
@@ -284,6 +299,7 @@ async def health() -> dict[str, object]:
                 detail={
                     "status": "unavailable",
                     "pipelines_ready": False,
+                    "frosty_pipeline_mode": FROSTY_PIPELINE_MODE,
                     "reason": "frosty-parse ingest pipelines not ensured",
                 },
             ) from None
@@ -291,8 +307,32 @@ async def health() -> dict[str, object]:
     return {
         "status": "ok",
         "pipelines_ready": True,
+        "frosty_pipeline_mode": FROSTY_PIPELINE_MODE,
         "elastic_host": ELASTIC_HOST,
     }
+
+
+@app.get("/metrics")
+async def metrics() -> PlainTextResponse:
+    """Prometheus text exposition for classify readiness and ensure failures."""
+    ready = 1 if _pipelines_ready else 0
+    with _ensure_failures_lock:
+        failures = _ensure_failures
+    body = "\n".join(
+        [
+            "# HELP splash_pipelines_ready 1 if frosty-parse ingest pipelines are ready",
+            "# TYPE splash_pipelines_ready gauge",
+            f"splash_pipelines_ready {ready}",
+            "# HELP splash_ensure_failures_total Data-stream ensure failures",
+            "# TYPE splash_ensure_failures_total counter",
+            f"splash_ensure_failures_total {failures}",
+            "# HELP splash_frosty_mode_info Frosty pipeline mode (1=active label)",
+            "# TYPE splash_frosty_mode_info gauge",
+            f'splash_frosty_mode_info{{mode="{FROSTY_PIPELINE_MODE}"}} 1',
+            "",
+        ]
+    )
+    return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
 
 
 @app.post("/classify", response_model=ClassifyResponse)

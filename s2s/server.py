@@ -276,6 +276,43 @@ async def health(request: web.Request) -> web.Response:
     )
 
 
+async def metrics(request: web.Request) -> web.Response:
+    """Prometheus text exposition for s2s-decode stats and upstream queue."""
+    stats: S2SStats = request.app["stats"]
+    queue: asyncio.Queue = request.app["upstream_queue"]
+    lines = [
+        "# HELP splash_s2s_handshake_seen_total Cooked-mode handshakes seen",
+        "# TYPE splash_s2s_handshake_seen_total counter",
+        f"splash_s2s_handshake_seen_total {stats.handshake_seen}",
+        "# HELP splash_s2s_frames_ok_total Successfully decoded S2S frames",
+        "# TYPE splash_s2s_frames_ok_total counter",
+        f"splash_s2s_frames_ok_total {stats.frames_ok}",
+        "# HELP splash_s2s_frames_bad_magic_total Frames rejected (bad magic/framing)",
+        "# TYPE splash_s2s_frames_bad_magic_total counter",
+        f"splash_s2s_frames_bad_magic_total {stats.frames_bad_magic}",
+        "# HELP splash_s2s_frames_oversized_total Oversized frames rejected",
+        "# TYPE splash_s2s_frames_oversized_total counter",
+        f"splash_s2s_frames_oversized_total {stats.frames_oversized}",
+        "# HELP splash_s2s_events_emitted_total Events enqueued to Logstash",
+        "# TYPE splash_s2s_events_emitted_total counter",
+        f"splash_s2s_events_emitted_total {stats.events_emitted}",
+        "# HELP splash_s2s_bytes_consumed_total Bytes read from Splunk clients",
+        "# TYPE splash_s2s_bytes_consumed_total counter",
+        f"splash_s2s_bytes_consumed_total {stats.bytes_consumed}",
+        "# HELP splash_s2s_upstream_queue Events waiting for Logstash upstream write",
+        "# TYPE splash_s2s_upstream_queue gauge",
+        f"splash_s2s_upstream_queue {queue.qsize()}",
+        "# HELP splash_s2s_upstream_queue_capacity Max upstream queue size",
+        "# TYPE splash_s2s_upstream_queue_capacity gauge",
+        f"splash_s2s_upstream_queue_capacity {UPSTREAM_QUEUE_SIZE}",
+        "",
+    ]
+    return web.Response(
+        text="\n".join(lines),
+        content_type="text/plain; version=0.0.4; charset=utf-8",
+    )
+
+
 async def start_background(app: web.Application) -> None:
     queue: asyncio.Queue = asyncio.Queue(maxsize=UPSTREAM_QUEUE_SIZE)
     stats = S2SStats()
@@ -346,6 +383,7 @@ async def stop_background(app: web.Application) -> None:
 def main() -> None:
     app = web.Application()
     app.router.add_get("/health", health)
+    app.router.add_get("/metrics", metrics)
     app.on_startup.append(start_background)
     app.on_cleanup.append(stop_background)
     web.run_app(app, host="0.0.0.0", port=HEALTH_PORT, print=None)
