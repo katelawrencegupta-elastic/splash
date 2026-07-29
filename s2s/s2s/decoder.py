@@ -18,6 +18,13 @@ from s2s.normalize import to_logstash_event
 
 logger = logging.getLogger(__name__)
 
+# Default: 32 MiB — above one 16 MiB max frame, bounds slowloris / stuck clients.
+DEFAULT_MAX_SESSION_BUFFER_BYTES = 32 * 1024 * 1024
+
+
+class SessionBufferExceeded(ValueError):
+    """Raised when the per-connection decode buffer exceeds its configured limit."""
+
 
 @dataclass
 class S2SStats:
@@ -37,6 +44,7 @@ class S2SSession:
     """Stateful decoder for one TCP connection."""
 
     max_frame_size: int = DEFAULT_MAX_MESSAGE_SIZE
+    max_session_buffer_bytes: int = DEFAULT_MAX_SESSION_BUFFER_BYTES
     extra_tags: list[str] = field(default_factory=lambda: ["s2s_decoded", "splunk_tcp_39998"])
     stats: S2SStats = field(default_factory=S2SStats)
     _buf: bytearray = field(default_factory=bytearray, repr=False)
@@ -53,6 +61,11 @@ class S2SSession:
             return
         self._buf.extend(data)
         self.stats.bytes_consumed += len(data)
+        if len(self._buf) > self.max_session_buffer_bytes:
+            raise SessionBufferExceeded(
+                f"session buffer {len(self._buf)} exceeds "
+                f"max_session_buffer_bytes={self.max_session_buffer_bytes}"
+            )
         yield from self._drain()
 
     def flush(self) -> Iterator[dict[str, Any]]:

@@ -101,6 +101,10 @@ spec:
               value: "8081"
             - name: S2S_UPSTREAM_QUEUE_SIZE
               value: {{ .Values.pipeline.upstreamQueueSize | quote }}
+            - name: S2S_MAX_CONNECTIONS
+              value: {{ .Values.pipeline.maxConnections | quote }}
+            - name: S2S_MAX_SESSION_BUFFER_BYTES
+              value: {{ .Values.pipeline.maxSessionBufferBytes | quote }}
           readinessProbe:
             httpGet:
               path: /health

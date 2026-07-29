@@ -1,10 +1,10 @@
-FROM python:3.12-slim
+# python:3.12-slim
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
 
 WORKDIR /app
 
 COPY requirements.txt .
-ENV PIP_REQUIRE_HASHES=0
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 COPY classify.py streams.py app.py classify_rules.json ./
 

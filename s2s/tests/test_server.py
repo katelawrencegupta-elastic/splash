@@ -162,3 +162,54 @@ def test_queue_put_applies_backpressure():
         assert queue.qsize() == 1
 
     asyncio.run(_run())
+
+
+def test_supervise_upstream_restarts_crashed_writer():
+    """A writer that exits with an exception is replaced while not shutting down."""
+
+    async def _run() -> None:
+        from server import _spawn_upstream_writer, _supervise_upstream  # noqa: E402
+
+        app: dict = {"shutting_down": False, "upstream_queue": asyncio.Queue()}
+        calls = {"n": 0}
+
+        async def boom_writer(queue, *, batch_size=1, flush_ms=0):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("writer crashed")
+            await asyncio.Future()  # second instance stays alive
+
+        monkey = pytest.MonkeyPatch()
+        try:
+            monkey.setattr("server.upstream_writer", boom_writer)
+            app["upstream_task"] = _spawn_upstream_writer(app["upstream_queue"])
+            supervisor = asyncio.create_task(_supervise_upstream(app))
+            try:
+                for _ in range(200):
+                    if calls["n"] >= 2 and app["upstream_task"] is not None:
+                        if not app["upstream_task"].done():
+                            break
+                    await asyncio.sleep(0)
+                assert calls["n"] >= 2
+                assert not app["upstream_task"].done()
+            finally:
+                app["shutting_down"] = True
+                app["upstream_task"].cancel()
+                supervisor.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await app["upstream_task"]
+                with pytest.raises(asyncio.CancelledError):
+                    await supervisor
+        finally:
+            monkey.undo()
+
+    asyncio.run(_run())
+
+
+def test_orjson_ndjson_roundtrip_smoke():
+    import orjson
+
+    event = {"message": "hello", "tags": ["s2s_decoded"], "n": 1}
+    line = orjson.dumps(event) + b"\n"
+    assert line.endswith(b"\n")
+    assert orjson.loads(line) == event

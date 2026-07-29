@@ -132,12 +132,22 @@ Metrics profile: `docker compose --profile metrics up -d` (DLQ exporter `:9102`,
 | `CLASSIFY_AUTH_DISABLED` | unset | Set `true` only for local scratch (skips Bearer check) |
 | `LS_JAVA_OPTS` | `-Xms1g -Xmx1g` | Logstash heap |
 | `S2S_UPSTREAM_*` | see compose | Decoder → Logstash queue / batch |
+| `S2S_MAX_CONNECTIONS` | `256` | Concurrent cooked S2S TCP sessions (extras refused) |
+| `S2S_MAX_SESSION_BUFFER_BYTES` | `33554432` | Per-session decode buffer cap (32 MiB) |
 
 ### Tuning
 
 - Prefer `UVICORN_WORKERS=1` so ensure/classify caches stay in one process.
 - Size `CLASSIFY_HTTP_POOL` near Logstash pipeline worker count (default 8; classify HTTP read_timeout is 5s).
 - Raise `ELASTIC_ENSURE_CONCURRENCY` only if cold multi-stream batches are slow and ES can take the load.
+
+When bumping Python deps for `s2s/` or `sidecar/`, regenerate hashed lockfiles:
+
+```bash
+pip-compile --generate-hashes -o requirements.txt requirements.in
+```
+
+Docker builds install with `pip install --require-hashes`.
 
 ## Sidecar API
 

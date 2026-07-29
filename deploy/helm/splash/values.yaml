@@ -80,6 +80,8 @@ pipeline:
     cookedPort: 39998
     uncookedPort: 39997
   upstreamQueueSize: "10000"
+  maxConnections: "256"
+  maxSessionBufferBytes: "33554432"
   classifyUrl: "" # default: http://{{ fullname }}-classify:8080
 
 dlqExporter:

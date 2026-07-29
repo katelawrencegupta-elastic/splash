@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from s2s.decoder import S2SSession
+from s2s.decoder import S2SSession, SessionBufferExceeded
 from s2s.handshake import SIGNATURE_SIZE
 from s2s.kv import KvParseError, encode_string, pack_kv_payload, parse_kv_payload
 from s2s.message import (
@@ -148,3 +148,9 @@ def test_session_byte_at_a_time():
 
 def test_handshake_size():
     assert len(make_handshake()) == SIGNATURE_SIZE
+
+
+def test_session_buffer_exceeded():
+    session = S2SSession(max_session_buffer_bytes=64)
+    with pytest.raises(SessionBufferExceeded):
+        list(session.feed(b"x" * 65))
