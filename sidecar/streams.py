@@ -302,6 +302,16 @@ class DataStreamManager:
     ) -> list[str]:
         """Ensure all required frosty-parse-* pipelines exist. Returns ensured names."""
         targets = list(names) if names is not None else required_ingest_pipelines()
-        for name in targets:
-            await self.ensure_ingest_pipeline(name)
+        if not targets:
+            return []
+        concurrency = max(
+            1, int(os.environ.get("ELASTIC_ENSURE_CONCURRENCY", "8"))
+        )
+        sem = asyncio.Semaphore(concurrency)
+
+        async def one(name: str) -> None:
+            async with sem:
+                await self.ensure_ingest_pipeline(name)
+
+        await asyncio.gather(*(one(name) for name in targets))
         return targets

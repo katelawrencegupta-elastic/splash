@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import os
 import threading
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Optional
+from typing import Annotated, AsyncIterator, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -30,6 +31,12 @@ ELASTIC_ENSURE_CONCURRENCY = max(
     1, int(os.environ.get("ELASTIC_ENSURE_CONCURRENCY", "8"))
 )
 FROSTY_PIPELINE_MODE = os.environ.get("FROSTY_PIPELINE_MODE", "require").strip().lower()
+CLASSIFY_AUTH_TOKEN = os.environ.get("CLASSIFY_AUTH_TOKEN", "").strip()
+CLASSIFY_AUTH_DISABLED = os.environ.get("CLASSIFY_AUTH_DISABLED", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 _manager: Optional[DataStreamManager] = None
 _manager_lock = threading.Lock()
@@ -103,6 +110,24 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="splash-classify", version="1.0.0", lifespan=lifespan)
+
+
+def require_mutate_auth(
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    """Bearer token required on mutating routes unless CLASSIFY_AUTH_DISABLED."""
+    if CLASSIFY_AUTH_DISABLED:
+        return
+    if not CLASSIFY_AUTH_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="CLASSIFY_AUTH_TOKEN is not configured",
+        )
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    provided = authorization[len("Bearer ") :].strip()
+    if not hmac.compare_digest(provided, CLASSIFY_AUTH_TOKEN):
+        raise HTTPException(status_code=401, detail="invalid bearer token")
 
 
 class ClassifyRequest(BaseModel):
@@ -314,7 +339,6 @@ async def health() -> dict[str, object]:
         "status": "ok",
         "pipelines_ready": True,
         "frosty_pipeline_mode": FROSTY_PIPELINE_MODE,
-        "elastic_host": ELASTIC_HOST,
     }
 
 
@@ -367,7 +391,10 @@ def _bump_http(path: str) -> None:
 
 
 @app.post("/classify", response_model=ClassifyResponse)
-async def classify(req: ClassifyRequest) -> ClassifyResponse:
+async def classify(
+    req: ClassifyRequest,
+    _: None = Depends(require_mutate_auth),
+) -> ClassifyResponse:
     _bump_http("/classify")
     try:
         result = _classify_fields(req)
@@ -378,7 +405,10 @@ async def classify(req: ClassifyRequest) -> ClassifyResponse:
 
 
 @app.post("/classify/batch", response_model=BatchClassifyResponse)
-async def classify_batch(req: BatchClassifyRequest) -> BatchClassifyResponse:
+async def classify_batch(
+    req: BatchClassifyRequest,
+    _: None = Depends(require_mutate_auth),
+) -> BatchClassifyResponse:
     _bump_http("/classify/batch")
     global _classify_batch_requests, _classify_batch_events
     with _metrics_counters_lock:
@@ -401,7 +431,10 @@ async def classify_batch(req: BatchClassifyRequest) -> BatchClassifyResponse:
 
 
 @app.post("/ensure/batch", response_model=EnsureBatchResponse)
-async def ensure_batch(req: EnsureBatchRequest) -> EnsureBatchResponse:
+async def ensure_batch(
+    req: EnsureBatchRequest,
+    _: None = Depends(require_mutate_auth),
+) -> EnsureBatchResponse:
     _bump_http("/ensure/batch")
     global _ensure_batch_requests, _ensure_batch_streams
     with _metrics_counters_lock:

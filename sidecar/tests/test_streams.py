@@ -180,8 +180,14 @@ async def test_ensure_ingest_pipelines_covers_all_kinds(
         "frosty-parse-syslog",
         "frosty-parse-generic",
     ]
-    # Each name: GET (present) → no PUT
+    # Each name: GET (present) → no PUT; gather may reorder calls
     manager._client.request.side_effect = [_ok_resp()] * len(names)
     ensured = await manager.ensure_ingest_pipelines()
-    assert ensured == names
+    assert set(ensured) == set(names)
     assert manager._client.request.await_count == len(names)
+    called = []
+    for c in manager._client.request.await_args_list:
+        # httpx mock: args may be (method, url) with absolute or relative path
+        url = str(c.args[1] if len(c.args) > 1 else c.kwargs.get("url", ""))
+        called.append(url.rsplit("/", 1)[-1])
+    assert set(called) == set(names)

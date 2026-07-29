@@ -83,7 +83,7 @@ Idle re-inject of message-path egress can wait up to ~1s.
 
 ### Low: S2S decoder copies whole buffer per frame
 
-**File:** `s2s/s2s/decoder.py` `bytes(self._buf)`
+**File:** `s2s/s2s/decoder.py` — hot path uses `memoryview(self._buf)` (no full-buffer copy).
 
 ### Low: Message-path still hits sidecar
 
@@ -99,12 +99,11 @@ Empty sourcetype/source events still use `/classify/batch` (intentional).
 | — | HTTP pool + workers=1 + async ES | Medium | Fixed |
 | — | Bounded buffers / coalesce waits / S2S upstream | High | Fixed |
 | 1 | Sub-second idle tick | Low | Open |
-| 2 | S2S decoder buffer copy | Low | Open |
+| 2 | S2S decoder buffer copy | Low | Fixed (`memoryview`) |
 
 ## Recommended next steps
 
 1. Optionally replace exec tick with a sub-second heartbeat if idle message-path latency matters
-2. Parse S2S frames from `memoryview` / offset APIs
 
 ## Smoke checklist
 

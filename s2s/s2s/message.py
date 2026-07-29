@@ -17,7 +17,14 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
-from s2s.kv import KvParseError, decode_key_value_at, decode_string_at, encode_key_value, encode_string
+from s2s.kv import (
+    Buffer,
+    KvParseError,
+    decode_key_value_at,
+    decode_string_at,
+    encode_key_value,
+    encode_string,
+)
 
 DEFAULT_MAX_MESSAGE_SIZE = 16 * 1024 * 1024  # 16 MiB
 
@@ -89,7 +96,7 @@ def _apply_kv(msg: S2SMessage, key: str, value: str) -> None:
         msg.fields[key] = value
 
 
-def decode_message(body: bytes) -> S2SMessage:
+def decode_message(body: Buffer) -> S2SMessage:
     """Decode message body after the leading size field (starts with maps count)."""
     if len(body) < 4:
         raise KvParseError("message body too short for maps count")
@@ -155,13 +162,17 @@ def maybe_encode_capabilities_reply(client_caps: str) -> bytes | None:
 
 
 def try_read_message(
-    buf: bytes, *, max_size: int = DEFAULT_MAX_MESSAGE_SIZE
+    buf: Buffer, *, max_size: int = DEFAULT_MAX_MESSAGE_SIZE
 ) -> tuple[S2SMessage | None, int, str | None]:
     """Try to read one framed message from ``buf``.
+
+    ``buf`` may be ``bytes`` or ``memoryview`` (zero-copy from a ``bytearray``).
 
     Returns ``(message, bytes_consumed, error)``.
     - ``(None, 0, None)`` → need more data
     - ``(None, n, err)`` → skip/resync consumed ``n`` bytes due to ``err``
+      Error strings are prefixed ``kv:`` for body/KV parse failures so callers
+      can increment ``frames_bad_kv`` vs framing counters.
     - ``(msg, n, None)`` → success
     """
     if len(buf) < 4:
@@ -177,7 +188,7 @@ def try_read_message(
     try:
         msg = decode_message(buf[4:total])
     except KvParseError as exc:
-        return None, 1, str(exc)
+        return None, 1, f"kv:{exc}"
     return msg, total, None
 
 

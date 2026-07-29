@@ -18,6 +18,8 @@ classify:
   replicaCount: 2
   image: splash-classify:latest
   imagePullPolicy: IfNotPresent
+  # Shared Bearer token for Logstash → classify mutating routes. Required.
+  authToken: ""
   resources:
     requests:
       cpu: 100m

@@ -79,12 +79,12 @@ class S2SSession:
         """Return True if signature was consumed; False if need more / failed."""
         if len(self._buf) < SIGNATURE_SIZE:
             # Wait if it looks like a partial banner prefix
-            peek = bytes(self._buf)
+            peek = memoryview(self._buf)
             if (
                 COOKED_BANNER_V3.startswith(peek)
                 or COOKED_BANNER_V2.startswith(peek)
-                or peek.startswith(COOKED_BANNER_V3[: min(8, len(peek))])
-                or peek.startswith(COOKED_BANNER_V2[: min(8, len(peek))])
+                or peek[: min(8, len(peek))] == COOKED_BANNER_V3[: min(8, len(peek))]
+                or peek[: min(8, len(peek))] == COOKED_BANNER_V2[: min(8, len(peek))]
             ):
                 return False
             if len(self._buf) == 0:
@@ -94,13 +94,15 @@ class S2SSession:
             logger.info("no cooked signature; decoding messages from offset 0")
             return True
 
-        parsed = parse_signature(bytes(self._buf[:SIGNATURE_SIZE]))
+        parsed = parse_signature(memoryview(self._buf)[:SIGNATURE_SIZE])
         if parsed is None:
             # Maybe signature starts later with junk? Try find banner within first 64 bytes
-            raw = bytes(self._buf)
-            idx = raw.find(COOKED_BANNER_V3)
+            view = memoryview(self._buf)
+            # memoryview has no .find; search in a bounded window only
+            window = bytes(view[: min(len(view), 64 + SIGNATURE_SIZE)])
+            idx = window.find(COOKED_BANNER_V3)
             if idx < 0:
-                idx = raw.find(COOKED_BANNER_V2)
+                idx = window.find(COOKED_BANNER_V2)
             if 0 < idx <= 64 and len(self._buf) >= idx + SIGNATURE_SIZE:
                 del self._buf[:idx]
                 return True  # retry next loop
@@ -126,13 +128,15 @@ class S2SSession:
     def _try_consume_message(self) -> dict[str, Any] | None | bool:
         """Return event dict, None if skipped, False if need more data."""
         msg, consumed, err = try_read_message(
-            bytes(self._buf), max_size=self.max_frame_size
+            memoryview(self._buf), max_size=self.max_frame_size
         )
         if consumed == 0 and err is None and msg is None:
             return False
         if err is not None:
             if "oversized" in err:
                 self.stats.frames_oversized += 1
+            elif err.startswith("kv:"):
+                self.stats.frames_bad_kv += 1
             else:
                 self.stats.frames_bad_magic += 1
             logger.warning("message framing error: %s; skipping 1 byte", err)

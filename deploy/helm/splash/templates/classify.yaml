@@ -39,6 +39,8 @@ spec:
               value: {{ .Values.elastic.httpTimeoutS | quote }}
             - name: ELASTIC_ENSURE_CONCURRENCY
               value: {{ .Values.elastic.ensureConcurrency | quote }}
+            - name: CLASSIFY_AUTH_TOKEN
+              value: {{ required "classify.authToken is required" .Values.classify.authToken | quote }}
           readinessProbe:
             httpGet:
               path: /health

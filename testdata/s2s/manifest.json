@@ -1,0 +1,60 @@
+{
+  "cases": [
+    {
+      "id": "handshake_event",
+      "bin": "handshake_event.bin",
+      "expect": {
+        "events": 1,
+        "message": "1.2.3.4 - - [21/Jul/2026:12:00:00 +0000] \"GET / HTTP/1.1\" 200 1234 \"-\" \"curl\"",
+        "splunk_index": "apache",
+        "sourcetype": "access_combined",
+        "frames_ok": 1,
+        "handshake_seen": 1,
+        "frames_bad_magic": 0,
+        "frames_bad_kv": 0,
+        "frames_oversized": 0,
+        "capabilities_replied": 0
+      }
+    },
+    {
+      "id": "caps_then_event",
+      "bin": "caps_then_event.bin",
+      "expect": {
+        "events": 1,
+        "message": "1.2.3.4 - - [21/Jul/2026:12:00:00 +0000] \"GET / HTTP/1.1\" 200 1234 \"-\" \"curl\"",
+        "frames_ok": 2,
+        "handshake_seen": 1,
+        "capabilities_replied": 1,
+        "frames_bad_magic": 0,
+        "frames_bad_kv": 0
+      }
+    },
+    {
+      "id": "undersized",
+      "bin": "undersized.bin",
+      "expect": {
+        "events": 0,
+        "frames_bad_magic_min": 1,
+        "handshake_seen": 1
+      }
+    },
+    {
+      "id": "oversized",
+      "bin": "oversized.bin",
+      "expect": {
+        "events": 0,
+        "frames_oversized_min": 1,
+        "handshake_seen": 1
+      }
+    },
+    {
+      "id": "bad_kv",
+      "bin": "bad_kv.bin",
+      "expect": {
+        "events": 0,
+        "frames_bad_kv_min": 1,
+        "handshake_seen": 1
+      }
+    }
+  ]
+}

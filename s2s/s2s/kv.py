@@ -5,6 +5,9 @@ from __future__ import annotations
 import struct
 from typing import Iterator
 
+# Wire buffer views (avoid copying full frames on the hot path).
+Buffer = bytes | memoryview | bytearray
+
 
 class KvParseError(ValueError):
     """Raised when length-prefixed strings cannot be parsed."""
@@ -16,7 +19,16 @@ def encode_string(value: str) -> bytes:
     return struct.pack(">I", len(data) + 1) + data + b"\x00"
 
 
-def decode_string_at(buf: bytes, offset: int) -> tuple[str, int]:
+def _slice_to_bytes(buf: Buffer, start: int, end: int) -> bytes:
+    chunk = buf[start:end]
+    if isinstance(chunk, memoryview):
+        return chunk.tobytes()
+    if isinstance(chunk, bytearray):
+        return bytes(chunk)
+    return chunk
+
+
+def decode_string_at(buf: Buffer, offset: int) -> tuple[str, int]:
     """Decode one string at ``offset``; return ``(value, next_offset)``."""
     if offset + 4 > len(buf):
         raise KvParseError(f"truncated length prefix at offset {offset}")
@@ -29,7 +41,7 @@ def decode_string_at(buf: bytes, offset: int) -> tuple[str, int]:
         raise KvParseError(f"string length {length} exceeds buffer at offset {offset}")
     if buf[end - 1] != 0:
         raise KvParseError(f"missing NUL terminator at offset {end - 1}")
-    raw = buf[offset : end - 1]
+    raw = _slice_to_bytes(buf, offset, end - 1)
     try:
         return raw.decode("utf-8"), end
     except UnicodeDecodeError as exc:
@@ -40,13 +52,13 @@ def encode_key_value(key: str, value: str) -> bytes:
     return encode_string(key) + encode_string(value)
 
 
-def decode_key_value_at(buf: bytes, offset: int) -> tuple[str, str, int]:
+def decode_key_value_at(buf: Buffer, offset: int) -> tuple[str, str, int]:
     key, offset = decode_string_at(buf, offset)
     value, offset = decode_string_at(buf, offset)
     return key, value, offset
 
 
-def iter_length_prefixed_strings(payload: bytes) -> Iterator[str]:
+def iter_length_prefixed_strings(payload: Buffer) -> Iterator[str]:
     """Yield strings from a contiguous payload (no message framing)."""
     offset = 0
     n = len(payload)
@@ -55,7 +67,7 @@ def iter_length_prefixed_strings(payload: bytes) -> Iterator[str]:
         yield value
 
 
-def parse_kv_payload(payload: bytes) -> dict[str, str]:
+def parse_kv_payload(payload: Buffer) -> dict[str, str]:
     """Parse alternating key/value strings into a dict (odd trailing → ``_orphan``)."""
     tokens = list(iter_length_prefixed_strings(payload))
     fields: dict[str, str] = {}

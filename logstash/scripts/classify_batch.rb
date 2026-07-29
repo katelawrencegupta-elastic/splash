@@ -7,7 +7,7 @@
 #
 # script_params: classify_url, batch_size, flush_ms, max_buffer, max_egress,
 #                message_prefix_bytes, data_stream_namespace, rules_path,
-#                http_pool_size
+#                http_pool_size, classify_auth_token
 
 def register(params)
   require "json"
@@ -35,6 +35,8 @@ def register(params)
   @rules_path = (params["rules_path"] || "/usr/share/logstash/scripts/classify_rules.json").to_s
   @http_pool_size = (params["http_pool_size"] || 4).to_i
   @http_pool_size = 1 if @http_pool_size < 1
+  token = (params["classify_auth_token"] || ENV["CLASSIFY_AUTH_TOKEN"] || "").to_s.strip
+  @classify_auth_token = token.empty? ? nil : token
 
   load_metadata_rules!(@rules_path)
 
@@ -425,6 +427,7 @@ def post_classify_batch(payloads)
   req = Net::HTTP::Post.new(@batch_uri.request_uri)
   req["Content-Type"] = "application/json"
   req["Connection"] = "keep-alive"
+  req["Authorization"] = "Bearer #{@classify_auth_token}" if @classify_auth_token
   req.body = JSON.generate("events" => payloads)
 
   resp = with_http { |http| http.request(req) }
@@ -449,6 +452,7 @@ def post_ensure(streams)
   req = Net::HTTP::Post.new(@ensure_uri.request_uri)
   req["Content-Type"] = "application/json"
   req["Connection"] = "keep-alive"
+  req["Authorization"] = "Bearer #{@classify_auth_token}" if @classify_auth_token
   req.body = JSON.generate("streams" => streams)
 
   resp = with_http { |http| http.request(req) }

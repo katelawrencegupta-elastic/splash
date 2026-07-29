@@ -27,7 +27,7 @@ recording: [deploy/alerts/splash-recording.yaml](../../deploy/alerts/splash-reco
 **Meaning:** `splash_pipelines_ready == 0`.
 
 **Actions:**
-1. `curl classify:8080/health` — read reason / `frosty_pipeline_mode`.
+1. `curl classify:8080/health` — read `reason` / `frosty_pipeline_mode` (no cluster URL is returned).
 2. Production (`require`): install `frosty-parse-access-log`, `frosty-parse-syslog`, `frosty-parse-generic` in Elasticsearch.
 3. POC only: set `FROSTY_PIPELINE_MODE=stub` and restart classify.
 4. Verify ES credentials and network.

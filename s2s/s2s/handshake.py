@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from s2s.kv import Buffer
+
 # struct S2S_Signature {
 #   char _signature[128];
 #   char _serverName[256];
@@ -17,7 +19,7 @@ COOKED_BANNER_V3 = b"--splunk-cooked-mode-v3--"
 COOKED_BANNER = COOKED_BANNER_V3  # default for fixtures / exports
 
 
-def parse_signature(buf: bytes) -> tuple[int, str, str] | None:
+def parse_signature(buf: Buffer) -> tuple[int, str, str] | None:
     """Parse a full 400-byte signature.
 
     Returns ``(protocol_version, server_name, mgmt_port)`` or ``None`` if
@@ -25,15 +27,17 @@ def parse_signature(buf: bytes) -> tuple[int, str, str] | None:
     """
     if len(buf) < SIGNATURE_SIZE:
         return None
-    banner = buf[:SIG_BANNER_LEN].rstrip(b"\x00")
+    # Handshake only — copy the fixed 400-byte window for rstrip/decode.
+    window = bytes(buf[:SIGNATURE_SIZE])
+    banner = window[:SIG_BANNER_LEN].rstrip(b"\x00")
     if banner == COOKED_BANNER_V3:
         version = 3
     elif banner == COOKED_BANNER_V2:
         version = 2
     else:
         return None
-    server = buf[SIG_BANNER_LEN : SIG_BANNER_LEN + SIG_SERVER_NAME_LEN].rstrip(b"\x00")
-    port = buf[
+    server = window[SIG_BANNER_LEN : SIG_BANNER_LEN + SIG_SERVER_NAME_LEN].rstrip(b"\x00")
+    port = window[
         SIG_BANNER_LEN
         + SIG_SERVER_NAME_LEN : SIG_BANNER_LEN
         + SIG_SERVER_NAME_LEN

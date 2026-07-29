@@ -128,6 +128,8 @@ Metrics profile: `docker compose --profile metrics up -d` (DLQ exporter `:9102`,
 | `ELASTIC_ENSURE_CONCURRENCY` | `8` | Max parallel stream ensures per batch |
 | `UVICORN_WORKERS` | `1` | Keep `1` for a single `_ensured`/LRU cache |
 | `CLASSIFY_HTTP_POOL` | `4` | Logstash keep-alive connections to classify |
+| `CLASSIFY_AUTH_TOKEN` | (compose default `splash-dev-classify-token`) | Shared Bearer for Logstash → classify mutating routes |
+| `CLASSIFY_AUTH_DISABLED` | unset | Set `true` only for local scratch (skips Bearer check) |
 | `LS_JAVA_OPTS` | `-Xms1g -Xmx1g` | Logstash heap |
 | `S2S_UPSTREAM_*` | see compose | Decoder → Logstash queue / batch |
 

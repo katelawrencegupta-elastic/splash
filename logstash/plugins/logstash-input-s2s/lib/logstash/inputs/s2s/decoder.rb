@@ -41,14 +41,15 @@ module LogStash
     end
 
     class Stats
-      attr_accessor :handshake_seen, :frames_ok, :frames_bad, :frames_oversized,
-                    :events_emitted, :bytes_consumed, :capabilities_replied,
-                    :protocol_version
+      attr_accessor :handshake_seen, :frames_ok, :frames_bad_magic, :frames_bad_kv,
+                    :frames_oversized, :events_emitted, :bytes_consumed,
+                    :capabilities_replied, :protocol_version
 
       def initialize
         @handshake_seen = 0
         @frames_ok = 0
-        @frames_bad = 0
+        @frames_bad_magic = 0
+        @frames_bad_kv = 0
         @frames_oversized = 0
         @events_emitted = 0
         @bytes_consumed = 0
@@ -194,7 +195,7 @@ module LogStash
           msg = decode_body(buf.byteslice(4, size))
           [msg, total, nil]
         rescue KvError => e
-          [nil, 1, e.message]
+          [nil, 1, "kv:#{e.message}"]
         end
       end
 
@@ -326,8 +327,10 @@ module LogStash
         if err
           if err.include?("oversized")
             @stats.frames_oversized += 1
+          elsif err.start_with?("kv:")
+            @stats.frames_bad_kv += 1
           else
-            @stats.frames_bad += 1
+            @stats.frames_bad_magic += 1
           end
           skip = [consumed, 1].max
           @buf = @buf.byteslice(skip..)

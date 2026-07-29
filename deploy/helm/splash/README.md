@@ -11,6 +11,7 @@ helm upgrade --install splash ./deploy/helm/splash \
   --namespace splash --create-namespace \
   --set elastic.host="$ELASTIC_HOST" \
   --set elastic.apiKey="$ELASTIC_API_KEY" \
+  --set classify.authToken="$CLASSIFY_AUTH_TOKEN" \
   --set frostyPipelineMode=require \
   --set pipeline.replicaCount=2 \
   --set classify.replicaCount=2
@@ -31,4 +32,6 @@ GB/s (see docs/runbooks/sharding.md), not daily totals alone.
   Scale classify for miss-path HA, not raw GB/s.
 - Pipeline is a **StatefulSet** with `persistence.enabled=true` (default 5Gi PVC
   per pod) so DLQ / classify_spill survive reschedule.
-- mTLS / ingest auth is a separate security track.
+- `classify.authToken` is required: Logstash sends `Authorization: Bearer …` on
+  `/classify`, `/classify/batch`, and `/ensure/batch`. `/health` and `/metrics`
+  stay open for probes. mTLS / Splunk ingest auth remains a separate track.

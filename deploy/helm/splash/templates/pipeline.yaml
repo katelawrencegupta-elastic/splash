@@ -36,6 +36,8 @@ spec:
               value: {{ required "elastic.apiKey is required" .Values.elastic.apiKey | quote }}
             - name: CLASSIFY_URL
               value: {{ include "splash.classifyUrl" . | quote }}
+            - name: CLASSIFY_AUTH_TOKEN
+              value: {{ required "classify.authToken is required" .Values.classify.authToken | quote }}
             - name: DATA_STREAM_NAMESPACE
               value: {{ .Values.elastic.namespace | quote }}
             - name: LS_JAVA_OPTS
