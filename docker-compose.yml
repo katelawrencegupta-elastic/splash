@@ -106,6 +106,23 @@ services:
       - logstash
     restart: unless-stopped
 
+  index-lag-probe:
+    build: ./deploy/index_lag_probe
+    container_name: splash-index-lag-probe
+    profiles: ["metrics"]
+    environment:
+      ELASTIC_HOST: "${ELASTIC_HOST:?ELASTIC_HOST is required}"
+      ELASTIC_API_KEY: "${ELASTIC_API_KEY:?ELASTIC_API_KEY is required}"
+      DATA_STREAM_NAMESPACE: "${DATA_STREAM_NAMESPACE:-default}"
+      S2S_HEALTH_URLS: "http://s2s-decode:8081/health"
+      INTERVAL_SECONDS: "${INDEX_LAG_INTERVAL_SECONDS:-15}"
+      LISTEN_PORT: "9103"
+    ports:
+      - "${INGEST_BIND:-127.0.0.1}:${INDEX_LAG_HOST_PORT:-9103}:9103"
+    depends_on:
+      - s2s-decode
+    restart: unless-stopped
+
   # Scrapes Splash /metrics and remote_writes to Elastic Cloud Prometheus API.
   prometheus:
     build: ./deploy/prometheus
@@ -124,11 +141,13 @@ services:
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml.tmpl:ro
       - ./deploy/alerts/splash-alerts.yaml:/etc/prometheus/rules/splash-alerts.yaml:ro
+      - ./deploy/alerts/splash-recording.yaml:/etc/prometheus/rules/splash-recording.yaml:ro
       - prometheus_data:/prometheus
     depends_on:
       - s2s-decode
       - classify
       - dlq-exporter
+      - index-lag-probe
     restart: unless-stopped
 
 volumes:

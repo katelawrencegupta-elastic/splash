@@ -1,11 +1,12 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: {{ include "splash.fullname" . }}-pipeline
   labels:
     {{- include "splash.labels" . | nindent 4 }}
     app.kubernetes.io/component: pipeline
 spec:
+  serviceName: {{ include "splash.fullname" . }}-pipeline-headless
   replicas: {{ .Values.pipeline.replicaCount }}
   selector:
     matchLabels:
@@ -110,12 +111,54 @@ spec:
               readOnly: true
         {{- end }}
       volumes:
-        - name: ls-data
-          emptyDir: {}
         - name: ls-config
           configMap:
             name: {{ include "splash.fullname" . }}-logstash-config
+        {{- if not .Values.pipeline.persistence.enabled }}
+        - name: ls-data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.pipeline.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: ls-data
+      spec:
+        accessModes:
+          - {{ .Values.pipeline.persistence.accessMode | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.pipeline.persistence.size | quote }}
+        {{- with .Values.pipeline.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+  {{- end }}
 ---
+# Headless Service for StatefulSet DNS (pipeline-0, pipeline-1, …).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "splash.fullname" . }}-pipeline-headless
+  labels:
+    {{- include "splash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pipeline
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: pipeline
+  ports:
+    - name: cooked
+      port: {{ .Values.pipeline.service.cookedPort }}
+      targetPort: cooked
+    - name: uncooked
+      port: {{ .Values.pipeline.service.uncookedPort }}
+      targetPort: uncooked
+    - name: s2s-health
+      port: 8081
+      targetPort: health
+---
+# VIP / LoadBalancer for Splunk tcpout.
 apiVersion: v1
 kind: Service
 metadata:

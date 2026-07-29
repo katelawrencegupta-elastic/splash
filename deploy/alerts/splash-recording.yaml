@@ -1,0 +1,39 @@
+# Prometheus recording rules for Splash capacity / miss-rate signals.
+#
+# Load alongside splash-alerts.yaml (PrometheusRule or classic rule_files).
+
+groups:
+  - name: splash-recording
+    interval: 15s
+    rules:
+      # Ingest GB/s (decimal): rate(bytes) / 1e9
+      - record: splash:ingest_gbps:1m
+        expr: sum(rate(splash_s2s_bytes_consumed_total[1m])) / 1e9
+
+      - record: splash:ingest_gbps:5m
+        expr: sum(rate(splash_s2s_bytes_consumed_total[5m])) / 1e9
+
+      - record: splash:ingest_gbps:1h
+        expr: sum(rate(splash_s2s_bytes_consumed_total[1h])) / 1e9
+
+      - record: splash:ingest_eps:1m
+        expr: sum(rate(splash_s2s_events_emitted_total[1m]))
+
+      - record: splash:peak_to_avg:1d
+        expr: >-
+          (
+            max_over_time(splash:ingest_gbps:5m[1d])
+            /
+            clamp_min(avg_over_time(splash:ingest_gbps:5m[1d]), 1e-12)
+          )
+
+      - record: splash:classify_miss_eps:1m
+        expr: sum(rate(splash_classify_batch_events_total[1m]))
+
+      - record: splash:miss_fraction:1m
+        expr: >-
+          (
+            splash:classify_miss_eps:1m
+            /
+            clamp_min(splash:ingest_eps:1m, 1e-9)
+          )

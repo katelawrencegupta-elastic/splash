@@ -1,0 +1,63 @@
+{{- if .Values.indexLagProbe.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "splash.fullname" . }}-index-lag
+  labels:
+    {{- include "splash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: index-lag
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: index-lag
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: index-lag
+    spec:
+      containers:
+        - name: index-lag-probe
+          image: {{ .Values.indexLagProbe.image | quote }}
+          imagePullPolicy: {{ .Values.pipeline.imagePullPolicy }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.indexLagProbe.port }}
+          env:
+            - name: ELASTIC_HOST
+              value: {{ required "elastic.host is required" .Values.elastic.host | quote }}
+            - name: ELASTIC_API_KEY
+              value: {{ required "elastic.apiKey is required" .Values.elastic.apiKey | quote }}
+            - name: DATA_STREAM_NAMESPACE
+              value: {{ .Values.elastic.namespace | quote }}
+            - name: INTERVAL_SECONDS
+              value: {{ .Values.indexLagProbe.intervalSeconds | quote }}
+            - name: LISTEN_PORT
+              value: {{ .Values.indexLagProbe.port | quote }}
+            {{- if .Values.indexLagProbe.s2sHealthUrls }}
+            - name: S2S_HEALTH_URLS
+              value: {{ .Values.indexLagProbe.s2sHealthUrls | quote }}
+            {{- else }}
+            - name: S2S_HEALTH_URLS
+              value: "{{ range $i, $_ := until (.Values.pipeline.replicaCount | int) }}{{ if $i }},{{ end }}http://{{ include "splash.fullname" $ }}-pipeline-{{ $i }}.{{ include "splash.fullname" $ }}-pipeline-headless:8081/health{{ end }}"
+            {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "splash.fullname" . }}-index-lag
+  labels:
+    {{- include "splash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: index-lag
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: index-lag
+  ports:
+    - name: metrics
+      port: {{ .Values.indexLagProbe.port }}
+      targetPort: metrics
+{{- end }}

@@ -51,10 +51,31 @@ environment (or pass `--elastic-host` / `--elastic-api-key`). Counts
 
 | ID | Path | Mix |
 |----|------|-----|
-| S1 | cooked | 100% hot metadata |
+| S1 | cooked | 100% hot metadata (~1536 B default) |
+| S1_512 | cooked | hot, **512 B** event-size matrix |
+| S1_1536 | cooked | hot, **1536 B** (planning baseline) |
+| S1_4096 | cooked | hot, **4096 B** event-size matrix |
 | S2 | cooked | 100% cold (empty sourcetype/source) |
 | S3 | cooked | 90% hot / 10% cold |
 | S4 | uncooked | 100% hot |
+
+Event-size matrix (re-measure when production P50 ≠ ~1.5 KB):
+
+```bash
+python -m loadtest run -s S1_512 --eps 5000 --duration 120
+python -m loadtest run -s S1_1536 --eps 5000 --duration 120
+python -m loadtest run -s S1_4096 --eps 5000 --duration 120
+```
+
+Capacity is primarily **GB/s**-bounded (~0.008/stack). Smaller events raise CPU per
+GB; compare steady GB/s and queue peg across the three runs before locking shard
+count (see `docs/runbooks/sharding.md`).
+
+Suggest shards from daily volume:
+
+```bash
+python suggest_shards.py --tb-day 1 --event-bytes 1536 --peak-factor 2
+```
 
 Edit `scenarios.yaml` for defaults (hosts, ports, warm/burst lengths).
 

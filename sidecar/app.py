@@ -36,6 +36,12 @@ _manager_lock = threading.Lock()
 _pipelines_ready = False
 _ensure_failures = 0
 _ensure_failures_lock = threading.Lock()
+_classify_batch_requests = 0
+_classify_batch_events = 0
+_ensure_batch_requests = 0
+_ensure_batch_streams = 0
+_http_requests: dict[str, int] = {}
+_metrics_counters_lock = threading.Lock()
 
 
 def get_manager() -> DataStreamManager:
@@ -314,29 +320,55 @@ async def health() -> dict[str, object]:
 
 @app.get("/metrics")
 async def metrics() -> PlainTextResponse:
-    """Prometheus text exposition for classify readiness and ensure failures."""
+    """Prometheus text exposition for classify readiness and request counters."""
     ready = 1 if _pipelines_ready else 0
     with _ensure_failures_lock:
         failures = _ensure_failures
-    body = "\n".join(
-        [
-            "# HELP splash_pipelines_ready 1 if frosty-parse ingest pipelines are ready",
-            "# TYPE splash_pipelines_ready gauge",
-            f"splash_pipelines_ready {ready}",
-            "# HELP splash_ensure_failures_total Data-stream ensure failures",
-            "# TYPE splash_ensure_failures_total counter",
-            f"splash_ensure_failures_total {failures}",
-            "# HELP splash_frosty_mode_info Frosty pipeline mode (1=active label)",
-            "# TYPE splash_frosty_mode_info gauge",
-            f'splash_frosty_mode_info{{mode="{FROSTY_PIPELINE_MODE}"}} 1',
-            "",
-        ]
-    )
-    return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
+    with _metrics_counters_lock:
+        batch_reqs = _classify_batch_requests
+        batch_events = _classify_batch_events
+        ensure_reqs = _ensure_batch_requests
+        ensure_streams = _ensure_batch_streams
+        http_counts = dict(_http_requests)
+    lines = [
+        "# HELP splash_pipelines_ready 1 if frosty-parse ingest pipelines are ready",
+        "# TYPE splash_pipelines_ready gauge",
+        f"splash_pipelines_ready {ready}",
+        "# HELP splash_ensure_failures_total Data-stream ensure failures",
+        "# TYPE splash_ensure_failures_total counter",
+        f"splash_ensure_failures_total {failures}",
+        "# HELP splash_frosty_mode_info Frosty pipeline mode (1=active label)",
+        "# TYPE splash_frosty_mode_info gauge",
+        f'splash_frosty_mode_info{{mode="{FROSTY_PIPELINE_MODE}"}} 1',
+        "# HELP splash_classify_batch_requests_total POST /classify/batch calls",
+        "# TYPE splash_classify_batch_requests_total counter",
+        f"splash_classify_batch_requests_total {batch_reqs}",
+        "# HELP splash_classify_batch_events_total Events in /classify/batch (metadata-miss path)",
+        "# TYPE splash_classify_batch_events_total counter",
+        f"splash_classify_batch_events_total {batch_events}",
+        "# HELP splash_ensure_batch_requests_total POST /ensure/batch calls",
+        "# TYPE splash_ensure_batch_requests_total counter",
+        f"splash_ensure_batch_requests_total {ensure_reqs}",
+        "# HELP splash_ensure_batch_streams_total Streams in /ensure/batch",
+        "# TYPE splash_ensure_batch_streams_total counter",
+        f"splash_ensure_batch_streams_total {ensure_streams}",
+        "# HELP splash_classify_http_requests_total Classify HTTP requests by path",
+        "# TYPE splash_classify_http_requests_total counter",
+    ]
+    for path, count in sorted(http_counts.items()):
+        lines.append(f'splash_classify_http_requests_total{{path="{path}"}} {count}')
+    lines.append("")
+    return PlainTextResponse("\n".join(lines), media_type="text/plain; version=0.0.4")
+
+
+def _bump_http(path: str) -> None:
+    with _metrics_counters_lock:
+        _http_requests[path] = _http_requests.get(path, 0) + 1
 
 
 @app.post("/classify", response_model=ClassifyResponse)
 async def classify(req: ClassifyRequest) -> ClassifyResponse:
+    _bump_http("/classify")
     try:
         result = _classify_fields(req)
     except Exception as exc:
@@ -347,6 +379,11 @@ async def classify(req: ClassifyRequest) -> ClassifyResponse:
 
 @app.post("/classify/batch", response_model=BatchClassifyResponse)
 async def classify_batch(req: BatchClassifyRequest) -> BatchClassifyResponse:
+    _bump_http("/classify/batch")
+    global _classify_batch_requests, _classify_batch_events
+    with _metrics_counters_lock:
+        _classify_batch_requests += 1
+        _classify_batch_events += len(req.events)
     if not req.events:
         return BatchClassifyResponse(results=[])
     if len(req.events) > 2000:
@@ -365,6 +402,11 @@ async def classify_batch(req: BatchClassifyRequest) -> BatchClassifyResponse:
 
 @app.post("/ensure/batch", response_model=EnsureBatchResponse)
 async def ensure_batch(req: EnsureBatchRequest) -> EnsureBatchResponse:
+    _bump_http("/ensure/batch")
+    global _ensure_batch_requests, _ensure_batch_streams
+    with _metrics_counters_lock:
+        _ensure_batch_requests += 1
+        _ensure_batch_streams += len(req.streams)
     if not req.streams:
         return EnsureBatchResponse(results=[])
     if len(req.streams) > 2000:

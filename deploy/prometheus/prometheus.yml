@@ -15,6 +15,7 @@ global:
 
 rule_files:
   - /etc/prometheus/rules/splash-alerts.yaml
+  - /etc/prometheus/rules/splash-recording.yaml
 
 scrape_configs:
   - job_name: splash-s2s
@@ -37,6 +38,13 @@ scrape_configs:
       - targets: ["dlq-exporter:9102"]
         labels:
           service: dlq-exporter
+
+  - job_name: splash-index-lag
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["index-lag-probe:9103"]
+        labels:
+          service: index-lag-probe
 
 remote_write:
   - url: __REMOTE_WRITE_URL__

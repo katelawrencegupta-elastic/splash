@@ -12,10 +12,33 @@ Load tests (hot cooked path, ~1.5 KB events):
 Planning formula (25% headroom):
 
 ```text
-shards ≈ ceil(target_GBps / 0.008) * 1.25
+shards ≈ ceil(ceil(peak_GBps / 0.008) * 1.25)
 ```
 
-Example: **1 GB/s** → ~125–160 shards. Do not plan above ~0.015 GB/s per stack without a fresh ramp test.
+Use **peak** GB/s, not daily average alone. Example: **1 GB/s peak** → ~125–160 shards. Do not plan above ~0.015 GB/s per stack without a fresh ramp test.
+
+### Measuring peak vs average
+
+Prometheus recording rules ([`deploy/alerts/splash-recording.yaml`](../../deploy/alerts/splash-recording.yaml)):
+
+| Series | Meaning |
+|--------|---------|
+| `splash:ingest_gbps:5m` | Ingest GB/s from s2s `bytes_consumed` |
+| `splash:ingest_eps:1m` | Events/s from s2s `events_emitted` |
+| `splash:peak_to_avg:1d` | max(5m GB/s over 1d) / avg(5m GB/s over 1d) |
+| `splash_s2s_avg_event_bytes` | Lifetime bytes/event (size skew signal) |
+
+**Workflow:**
+
+1. After ≥24h of production (or a representative load day), query `splash:peak_to_avg:1d` and `max_over_time(splash:ingest_gbps:5m[1d])`.
+2. Plug peak into the shard formula above.
+3. Cross-check with cloud NLB/VIP **ProcessedBytes** (or equivalent) on the cooked listener — should track s2s bytes within framing overhead.
+4. If `splash_s2s_avg_event_bytes` is far from ~1536, re-run the S1 event-size matrix (`S1_512` / `S1_1536` / `S1_4096`) before locking shard count.
+5. Alert `SplashPeakToAvgHigh` fires when peak/avg &gt; 3 (daily-total sizing is unsafe).
+
+### Event size
+
+Capacity numbers assume ~1.5 KB events. Smaller events raise CPU per GB; larger raise bytes at fewer filter ops. Measure P50 with `splash_s2s_avg_event_bytes` (or Splunk `_raw` length) and re-measure if ≠ ~1.5 KB.
 
 ## Compose shards (already in repo)
 
@@ -51,6 +74,8 @@ listen splash_cooked
 ### Cloud NLB
 
 Create a TCP Network Load Balancer targeting an ASG / target group of Splash nodes on port 39998. Register s2s health on 8081 if HTTP health checks are supported; otherwise TCP.
+
+Use the NLB byte counters as an independent peak/avg check against Prometheus `splash:ingest_gbps:*`.
 
 ### Splunk
 

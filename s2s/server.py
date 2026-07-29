@@ -280,6 +280,11 @@ async def metrics(request: web.Request) -> web.Response:
     """Prometheus text exposition for s2s-decode stats and upstream queue."""
     stats: S2SStats = request.app["stats"]
     queue: asyncio.Queue = request.app["upstream_queue"]
+    avg_event_bytes = (
+        float(stats.bytes_consumed) / float(stats.events_emitted)
+        if stats.events_emitted > 0
+        else 0.0
+    )
     lines = [
         "# HELP splash_s2s_handshake_seen_total Cooked-mode handshakes seen",
         "# TYPE splash_s2s_handshake_seen_total counter",
@@ -299,6 +304,9 @@ async def metrics(request: web.Request) -> web.Response:
         "# HELP splash_s2s_bytes_consumed_total Bytes read from Splunk clients",
         "# TYPE splash_s2s_bytes_consumed_total counter",
         f"splash_s2s_bytes_consumed_total {stats.bytes_consumed}",
+        "# HELP splash_s2s_avg_event_bytes Average bytes per emitted event (lifetime)",
+        "# TYPE splash_s2s_avg_event_bytes gauge",
+        f"splash_s2s_avg_event_bytes {avg_event_bytes:.3f}",
         "# HELP splash_s2s_upstream_queue Events waiting for Logstash upstream write",
         "# TYPE splash_s2s_upstream_queue gauge",
         f"splash_s2s_upstream_queue {queue.qsize()}",
@@ -307,9 +315,11 @@ async def metrics(request: web.Request) -> web.Response:
         f"splash_s2s_upstream_queue_capacity {UPSTREAM_QUEUE_SIZE}",
         "",
     ]
+    # aiohttp forbids charset inside content_type; charset is set separately.
     return web.Response(
         text="\n".join(lines),
-        content_type="text/plain; version=0.0.4; charset=utf-8",
+        content_type="text/plain; version=0.0.4",
+        charset="utf-8",
     )
 
 

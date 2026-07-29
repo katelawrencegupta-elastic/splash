@@ -15,7 +15,7 @@ elastic:
 frostyPipelineMode: require
 
 classify:
-  replicaCount: 1
+  replicaCount: 2
   image: splash-classify:latest
   imagePullPolicy: IfNotPresent
   resources:
@@ -30,12 +30,18 @@ classify:
     port: 8080
 
 pipeline:
-  # Each replica is one s2s-decode + Logstash pair (shared network namespace).
+  # Each replica is one s2s-decode + Logstash pair (StatefulSet pod).
   replicaCount: 2
   s2sImage: splash-s2s-decode:latest
   logstashImage: splash-logstash:latest
   imagePullPolicy: IfNotPresent
   lsJavaOpts: "-Xms1g -Xmx1g"
+  # Per-pod PVC for DLQ + classify_spill (survives reschedule).
+  persistence:
+    enabled: true
+    size: 5Gi
+    accessMode: ReadWriteOnce
+    storageClassName: ""
   resources:
     s2s:
       requests:
@@ -62,5 +68,14 @@ dlqExporter:
   enabled: true
   image: splash-dlq-exporter:latest
   port: 9102
+
+indexLagProbe:
+  enabled: true
+  image: splash-index-lag-probe:latest
+  port: 9103
+  # Poll interval seconds; compares s2s events_emitted rate vs ES _count delta.
+  intervalSeconds: "15"
+  # Comma-separated s2s health URLs (in-cluster). Empty = headless pipeline pods.
+  s2sHealthUrls: ""
 
 ingestBind: "0.0.0.0"

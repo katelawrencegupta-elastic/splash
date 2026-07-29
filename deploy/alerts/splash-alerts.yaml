@@ -1,8 +1,9 @@
 # Prometheus / Alertmanager rules for Splash
 #
 # Load with PrometheusRule (kube-prometheus) or as a classic rules file.
+# Also load deploy/alerts/splash-recording.yaml for derived series.
 # Metric names match /metrics on s2s-decode (:8081), classify (:8080),
-# and dlq_exporter (:9102).
+# dlq_exporter (:9102), and index_lag_probe (:9103).
 
 groups:
   - name: splash
@@ -53,5 +54,35 @@ groups:
           summary: "Splash index lag high"
           description: >-
             Index lag {{ $value }}s on {{ $labels.instance }}.
-            Requires an external probe exporting splash_index_lag_seconds;
-            until that probe exists, use loadtest ES _count vs sent and LS bulk latency.
+            See docs/runbooks/alerting.md (index lag probe).
+
+      - alert: SplashPeakToAvgHigh
+        expr: splash:peak_to_avg:1d > 3
+        for: 1h
+        labels:
+          severity: warning
+          service: splash
+        annotations:
+          summary: "Splash ingest peak/avg ratio high"
+          description: >-
+            peak_to_avg={{ $value }} over 1d. Daily-total sizing understates need;
+            re-run shards ≈ ceil(ceil(peak_GBps/0.008)×1.25) on measured peak.
+            See docs/runbooks/sharding.md.
+
+      - alert: SplashClassifyMissStorm
+        expr: >
+          (
+            splash:miss_fraction:1m > 0.25
+            or splash:classify_miss_eps:1m > 2000
+          )
+          and splash:ingest_eps:1m > 100
+        for: 5m
+        labels:
+          severity: warning
+          service: splash
+        annotations:
+          summary: "Splash classify metadata-miss storm"
+          description: >-
+            miss_fraction or miss_eps elevated on {{ $labels.instance }}.
+            Expand classify_rules.json, check UF sourcetype/source, or scale classify.
+            See docs/runbooks/alerting.md.
