@@ -54,6 +54,20 @@ Pods use `terminationGracePeriodSeconds: 40` (covers s2s 30s drain).
   per pod) so DLQ / classify_spill survive reschedule.
 - Classify HTTP middleware requires `Authorization: Bearer …` on mutating
   routes (`/classify*`, `/ensure/*`). `/health` and `/metrics` stay open for
-  probes and scrapes. mTLS / Splunk ingest auth remains a separate track.
+  probes and scrapes (intentionally unauthenticated so kubelet / Prometheus
+  work without tokens). Further lockdown is NetworkPolicy or mTLS — separate
+  track; Splunk ingest auth likewise deferred.
 - Readiness + liveness probes are set on classify, Logstash, s2s-decode,
   dlq-exporter, and index-lag-probe.
+
+### Logstash `ELASTIC_API_KEY` (accepted residual)
+
+The Elasticsearch output expands `api_key => "${ELASTIC_API_KEY}"` from the
+process environment. Helm always injects that variable via `secretKeyRef`
+(never a plaintext `env.value`), but the key is still visible in the pod env
+and to any process inside the container — normal for this plugin.
+
+**Production preference:** set `existingSecret` from an external secret manager
+so the credential is not stored in Helm release values. Rotate by updating the
+Secret and rolling pods. Logstash keystore / file-based API-key credentials
+are out of scope (limited Cloud API key support).
