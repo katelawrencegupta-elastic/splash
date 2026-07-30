@@ -8,8 +8,8 @@ import random
 import sys
 from pathlib import Path
 
-# Import the in-repo s2s package (splash/s2s).
-_S2S_ROOT = Path(__file__).resolve().parents[2] / "s2s"
+# Import the in-repo s2s package (packages/s2s-decode).
+_S2S_ROOT = Path(__file__).resolve().parents[2] / "packages" / "s2s-decode"
 if str(_S2S_ROOT) not in sys.path:
     sys.path.insert(0, str(_S2S_ROOT))
 

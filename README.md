@@ -141,7 +141,7 @@ Metrics profile: `docker compose --profile metrics up -d` (DLQ exporter `:9102`,
 - Size `CLASSIFY_HTTP_POOL` near Logstash pipeline worker count (default 8; classify HTTP read_timeout is 5s).
 - Raise `ELASTIC_ENSURE_CONCURRENCY` only if cold multi-stream batches are slow and ES can take the load.
 
-When bumping Python deps for `s2s/` or `sidecar/`, regenerate hashed lockfiles:
+When bumping Python deps for `packages/s2s-decode/` or `sidecar/`, regenerate hashed lockfiles:
 
 ```bash
 pip-compile --generate-hashes -o requirements.txt requirements.in
@@ -167,12 +167,27 @@ splash/
 ├── docker-compose.loadtest.yml
 ├── scripts/run-shard.sh    # COMPOSE_PROJECT_NAME + port helper
 ├── PERFORMANCE.md
+├── packages/
+│   ├── s2s-decode/         # Cooked S2S TCP → NDJSON
+│   └── logstash-pipeline/  # Uncooked TCP + classify filter + ES
+├── testdata/s2s/           # Protocol golden binaries
+├── docs/contracts/         # Cross-package contracts (NDJSON handoff)
 ├── loadtest/               # Synthetic load harness
-├── sidecar/
-├── logstash/
-├── s2s/
+├── sidecar/                # Classify FastAPI
+├── deploy/helm/
 └── splunk/outputs.conf     # Single + multi-server tcpout examples
 ```
+
+### Package ownership
+
+| Package | Owns | Must not own |
+|---------|------|--------------|
+| `packages/s2s-decode` | Cooked TCP, decoder, NDJSON upstream, s2s metrics | Logstash pipelines, classify HTTP |
+| `packages/logstash-pipeline` | `logstash.conf`, `classify_batch.rb`, LS image | Cooked S2S wire decode |
+| `testdata/s2s` | Binary goldens for protocol | Runtime images |
+| `sidecar` | Classify/ensure API + rules source of truth | S2S framing |
+
+Handoff contract: [`docs/contracts/s2s-ndjson.md`](docs/contracts/s2s-ndjson.md).
 
 ## Development
 
@@ -194,8 +209,9 @@ pip install -r requirements.txt
 python -m loadtest run -s S1 --eps 1000 --duration 30 --steady-only
 ```
 
-Keep `sidecar/classify_rules.json` and `logstash/scripts/classify_rules.json` in sync (compose overlays the sidecar file at runtime; a unit test asserts the copies match).
+Keep `sidecar/classify_rules.json` and `packages/logstash-pipeline/scripts/classify_rules.json` in sync (compose overlays the sidecar file at runtime; a unit test asserts the copies match).
 
 ## Docs
 
 - [`PERFORMANCE.md`](PERFORMANCE.md) — data-flow, tuning, open bottlenecks
+- [`docs/contracts/s2s-ndjson.md`](docs/contracts/s2s-ndjson.md) — s2s-decode → Logstash NDJSON contract

@@ -62,8 +62,8 @@ Splunk cooked tcpout :39998
 | `DataStreamManager.close()` on shutdown | `sidecar/app.py` lifespan |
 | `stdout rubydebug` removed | `logstash.conf` |
 | `pipeline.batch.size: 500` | `logstash.yml` |
-| S2S upstream: inflight retry, batching, backpressure | `s2s/server.py` |
-| S2S graceful drain on shutdown | `s2s/server.py` |
+| S2S upstream: inflight retry, batching, backpressure | `packages/s2s-decode/server.py` |
+| S2S graceful drain on shutdown | `packages/s2s-decode/server.py` |
 | Elasticsearch host from env only (fail-fast) | `sidecar/app.py`, compose |
 | Cooked S2S via `s2s-decode` only | compose + Dockerfile |
 | Bounded `@buffer` / `@egress` + TCP backpressure | `classify_batch.rb` |
@@ -77,13 +77,13 @@ Splunk cooked tcpout :39998
 
 ### Low: Heartbeat tick is 1s resolution
 
-**File:** `logstash/pipeline/logstash.conf` — `heartbeat` input (replaced shell `exec` tick).
+**File:** `packages/logstash-pipeline/pipeline/logstash.conf` — `heartbeat` input (replaced shell `exec` tick).
 
 Idle re-inject of message-path egress can wait up to ~1s. Sub-second interval is optional if latency matters.
 
 ### Low: S2S decoder copies whole buffer per frame
 
-**File:** `s2s/s2s/decoder.py` — hot path uses `memoryview(self._buf)` (no full-buffer copy).
+**File:** `packages/s2s-decode/s2s/decoder.py` — hot path uses `memoryview(self._buf)` (no full-buffer copy).
 
 ### Low: Message-path still hits sidecar
 

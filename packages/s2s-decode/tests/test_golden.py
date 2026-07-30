@@ -1,13 +1,12 @@
-"""Shared golden fixtures: Python and Ruby must pass the same corpus.
+"""Shared golden fixtures for the production Python s2s-decode path.
 
 Protocol / framing changes require updating files under ``splash/testdata/s2s/``
-and re-running both:
+and re-running:
 
-  cd splash/s2s && pytest tests/test_golden.py
-  ruby splash/logstash/plugins/logstash-input-s2s/test_decoder.rb
+  cd packages/s2s-decode && PYTHONPATH=. pytest tests/test_golden.py
 
-Production cooked path is Python ``s2s-decode``. The Ruby Logstash input is a
-port kept in sync via these goldens (not optional for protocol fixes).
+Cooked ingest is Python-only. The NDJSON handoff to Logstash is documented in
+``docs/contracts/s2s-ndjson.md``.
 """
 
 from __future__ import annotations
@@ -20,8 +19,8 @@ import pytest
 from s2s.decoder import S2SSession
 from s2s.message import try_read_message
 
-# splash/testdata/s2s (repo-relative from s2s package tests)
-GOLDEN_ROOT = Path(__file__).resolve().parents[2] / "testdata" / "s2s"
+# splash/testdata/s2s (repo root relative from packages/s2s-decode/tests)
+GOLDEN_ROOT = Path(__file__).resolve().parents[3] / "testdata" / "s2s"
 
 
 def _load_manifest() -> list[dict]:

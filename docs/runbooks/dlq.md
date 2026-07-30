@@ -5,7 +5,7 @@
 Logstash is configured with:
 
 ```yaml
-# logstash/config/logstash.yml
+# packages/logstash-pipeline/config/logstash.yml
 dead_letter_queue.enable: true
 dead_letter_queue.max_bytes: 1073741824
 ```

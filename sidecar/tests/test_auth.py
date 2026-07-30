@@ -95,7 +95,7 @@ def test_classify_batch_rb_matches_helm_copy() -> None:
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[2]
-    a = (root / "logstash" / "scripts" / "classify_batch.rb").read_text(encoding="utf-8")
+    a = (root / "packages" / "logstash-pipeline" / "scripts" / "classify_batch.rb").read_text(encoding="utf-8")
     b = (
         root / "deploy" / "helm" / "splash" / "files" / "classify_batch.rb"
     ).read_text(encoding="utf-8")

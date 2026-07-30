@@ -22,7 +22,7 @@ services:
       start_period: 10s
 
   logstash:
-    build: ./logstash
+    build: ./packages/logstash-pipeline
     container_name: splash-logstash
     # Bind to loopback by default so host-published ingest is not world-reachable.
     # For remote Splunk forwarders set INGEST_BIND=0.0.0.0 in .env.
@@ -45,11 +45,11 @@ services:
       # 512m is tight under batch classify + ES bulk; override via LS_JAVA_OPTS if needed.
       LS_JAVA_OPTS: "${LS_JAVA_OPTS:--Xms1g -Xmx1g}"
     volumes:
-      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
-      - ./logstash/scripts:/usr/share/logstash/scripts:ro
+      - ./packages/logstash-pipeline/pipeline:/usr/share/logstash/pipeline:ro
+      - ./packages/logstash-pipeline/scripts:/usr/share/logstash/scripts:ro
       # Canonical rules live in sidecar/; overlay so Logstash and classify stay in sync.
       - ./sidecar/classify_rules.json:/usr/share/logstash/scripts/classify_rules.json:ro
-      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ./packages/logstash-pipeline/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
       - logstash_data:/usr/share/logstash/data
     depends_on:
       classify:
@@ -62,9 +62,9 @@ services:
       retries: 12
       start_period: 90s
 
-  # Owns cooked S2S on 39998 (mutually exclusive with logstash-input-s2s).
+  # Owns cooked S2S on 39998 (Python s2s-decode only).
   s2s-decode:
-    build: ./s2s
+    build: ./packages/s2s-decode
     container_name: splash-s2s-decode
     ports:
       - "${INGEST_BIND:-127.0.0.1}:39998:39998"

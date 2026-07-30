@@ -20,7 +20,8 @@ def test_logstash_rules_file_matches_sidecar() -> None:
     sidecar = Path(__file__).resolve().parents[1] / "classify_rules.json"
     logstash = (
         Path(__file__).resolve().parents[2]
-        / "logstash"
+        / "packages"
+        / "logstash-pipeline"
         / "scripts"
         / "classify_rules.json"
     )
