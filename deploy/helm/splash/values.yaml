@@ -97,5 +97,12 @@ indexLagProbe:
   intervalSeconds: "15"
   # Comma-separated s2s health URLs (in-cluster). Empty = headless pipeline pods.
   s2sHealthUrls: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
 
 ingestBind: "0.0.0.0"
