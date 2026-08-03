@@ -3,16 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import sys
-from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from server import _SHUTDOWN, _fill_batch, upstream_writer  # noqa: E402
+from s2s.server import _SHUTDOWN, _fill_batch, upstream_writer
 
 
 class _FakeReader:
@@ -90,8 +84,8 @@ def test_upstream_writer_retries_inflight_after_disconnect(monkeypatch):
         async def fake_sleep(_delay: float) -> None:
             await real_sleep(0)
 
-        monkeypatch.setattr("server.asyncio.open_connection", fake_open_connection)
-        monkeypatch.setattr("server.asyncio.sleep", fake_sleep)
+        monkeypatch.setattr("s2s.server.asyncio.open_connection", fake_open_connection)
+        monkeypatch.setattr("s2s.server.asyncio.sleep", fake_sleep)
 
         task = asyncio.create_task(upstream_writer(queue, batch_size=1, flush_ms=0))
         try:
@@ -129,7 +123,7 @@ def test_upstream_writer_batches_before_drain(monkeypatch):
         async def fake_open_connection(host, port):
             return _FakeReader(), CountingWriter()
 
-        monkeypatch.setattr("server.asyncio.open_connection", fake_open_connection)
+        monkeypatch.setattr("s2s.server.asyncio.open_connection", fake_open_connection)
 
         task = asyncio.create_task(
             upstream_writer(queue, batch_size=4, flush_ms=0)
@@ -168,7 +162,7 @@ def test_supervise_upstream_restarts_crashed_writer():
     """A writer that exits with an exception is replaced while not shutting down."""
 
     async def _run() -> None:
-        from server import _spawn_upstream_writer, _supervise_upstream  # noqa: E402
+        from s2s.server import _spawn_upstream_writer, _supervise_upstream
 
         app: dict = {"shutting_down": False, "upstream_queue": asyncio.Queue()}
         calls = {"n": 0}
@@ -181,7 +175,7 @@ def test_supervise_upstream_restarts_crashed_writer():
 
         monkey = pytest.MonkeyPatch()
         try:
-            monkey.setattr("server.upstream_writer", boom_writer)
+            monkey.setattr("s2s.server.upstream_writer", boom_writer)
             app["upstream_task"] = _spawn_upstream_writer(app["upstream_queue"])
             supervisor = asyncio.create_task(_supervise_upstream(app))
             try:

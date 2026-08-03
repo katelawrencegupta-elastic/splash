@@ -42,9 +42,9 @@ def build_cap_response(client_caps: str) -> str:
         for part in client_caps.split(";")
         if "=" in part
     }
-    pl = caps.get("pl", "0")
-    v4 = caps.get("v4", "0")
-    v4_flag = "true" if v4 in {"1", "true", "True"} else "false"
+    pl_raw = caps.get("pl", "0")
+    pl = str(int(pl_raw)) if pl_raw.isdigit() else "0"
+    v4_flag = "true" if caps.get("v4", "0") in {"1", "true", "True"} else "false"
     return (
         "cap_response=success;"
         "cap_flush_key=false;"
@@ -179,16 +179,18 @@ def try_read_message(
         return None, 0, None
     (size,) = struct.unpack(">I", buf[:4])
     if size > max_size:
-        return None, 1, f"oversized message size={size}"
+        # Consume the header plus as much of the claimed body as is buffered.
+        skip = min(4 + size, len(buf))
+        return None, skip, f"oversized message size={size}"
     if size < 4:
-        return None, 1, f"undersized message size={size}"
+        return None, 4, f"undersized message size={size}"
     total = 4 + size
     if len(buf) < total:
         return None, 0, None
     try:
         msg = decode_message(buf[4:total])
     except KvParseError as exc:
-        return None, 1, f"kv:{exc}"
+        return None, total, f"kv:{exc}"
     return msg, total, None
 
 

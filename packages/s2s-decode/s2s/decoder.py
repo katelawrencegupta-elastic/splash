@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, fields
+from typing import Any, NamedTuple
 
 from s2s.handshake import COOKED_BANNER_V2, COOKED_BANNER_V3, SIGNATURE_SIZE, parse_signature
 from s2s.message import (
@@ -26,6 +26,18 @@ class SessionBufferExceeded(ValueError):
     """Raised when the per-connection decode buffer exceeds its configured limit."""
 
 
+class NeedMore(NamedTuple):
+    """Incomplete frame; stop draining until more bytes arrive."""
+
+
+class Skipped(NamedTuple):
+    """Control message or framing error; keep draining."""
+
+
+class DecodedEvent(NamedTuple):
+    event: dict[str, Any]
+
+
 @dataclass
 class S2SStats:
     handshake_seen: int = 0
@@ -37,6 +49,17 @@ class S2SStats:
     bytes_consumed: int = 0
     capabilities_replied: int = 0
     protocol_version: int = 0
+
+    def __iadd__(self, other: S2SStats) -> S2SStats:
+        if not isinstance(other, S2SStats):
+            return NotImplemented
+        for f in fields(self):
+            if f.name == "protocol_version":
+                if other.protocol_version:
+                    self.protocol_version = other.protocol_version
+                continue
+            setattr(self, f.name, getattr(self, f.name) + getattr(other, f.name))
+        return self
 
 
 @dataclass
@@ -81,12 +104,12 @@ class S2SSession:
                     return
                 continue
 
-            event = self._try_consume_message()
-            if event is False:
-                return  # need more data
-            if event is None:
-                continue  # skipped control / error, keep draining
-            yield event
+            result = self._try_consume_message()
+            if isinstance(result, NeedMore):
+                return
+            if isinstance(result, Skipped):
+                continue
+            yield result.event
 
     def _try_consume_signature(self) -> bool:
         """Return True if signature was consumed; False if need more / failed."""
@@ -138,13 +161,13 @@ class S2SSession:
         )
         return True
 
-    def _try_consume_message(self) -> dict[str, Any] | None | bool:
-        """Return event dict, None if skipped, False if need more data."""
+    def _try_consume_message(self) -> NeedMore | Skipped | DecodedEvent:
+        """Return NeedMore, Skipped, or DecodedEvent."""
         msg, consumed, err = try_read_message(
             memoryview(self._buf), max_size=self.max_frame_size
         )
         if consumed == 0 and err is None and msg is None:
-            return False
+            return NeedMore()
         if err is not None:
             if "oversized" in err:
                 self.stats.frames_oversized += 1
@@ -152,9 +175,10 @@ class S2SSession:
                 self.stats.frames_bad_kv += 1
             else:
                 self.stats.frames_bad_magic += 1
-            logger.warning("message framing error: %s; skipping 1 byte", err)
-            del self._buf[: max(consumed, 1)]
-            return None
+            skip = max(consumed, 1)
+            logger.warning("message framing error: %s; skipping %s byte(s)", err, skip)
+            del self._buf[:skip]
+            return Skipped()
         assert msg is not None and consumed > 0
         del self._buf[:consumed]
         self.stats.frames_ok += 1
@@ -169,13 +193,13 @@ class S2SSession:
             else:
                 logger.info("ignoring s2s capabilities (no reply): %s", caps)
             if not msg.raw:
-                return None
+                return Skipped()
 
         if not msg.raw:
             # Control / flush with no payload
-            return None
+            return Skipped()
 
-        fields = message_to_flat_fields(msg)
-        event = to_logstash_event(fields, extra_tags=list(self.extra_tags))
+        flat = message_to_flat_fields(msg)
+        event = to_logstash_event(flat, extra_tags=list(self.extra_tags))
         self.stats.events_emitted += 1
-        return event
+        return DecodedEvent(event)

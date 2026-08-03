@@ -62,8 +62,8 @@ Splunk cooked tcpout :39998
 | `DataStreamManager.close()` on shutdown | `sidecar/app.py` lifespan |
 | `stdout rubydebug` removed | `logstash.conf` |
 | `pipeline.batch.size: 500` | `logstash.yml` |
-| S2S upstream: inflight retry, batching, backpressure | `packages/s2s-decode/server.py` |
-| S2S graceful drain on shutdown | `packages/s2s-decode/server.py` |
+| S2S upstream: inflight retry, batching, backpressure | `packages/s2s-decode/s2s/server.py` |
+| S2S graceful drain on shutdown | `packages/s2s-decode/s2s/server.py` |
 | Elasticsearch host from env only (fail-fast) | `sidecar/app.py`, compose |
 | Cooked S2S via `s2s-decode` only | compose + Dockerfile |
 | Bounded `@buffer` / `@egress` + TCP backpressure | `classify_batch.rb` |

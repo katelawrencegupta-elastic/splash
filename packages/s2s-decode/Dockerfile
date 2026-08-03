@@ -7,10 +7,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 COPY s2s ./s2s
-COPY server.py ./
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 EXPOSE 39998 8081
 
-CMD ["python", "server.py"]
+CMD ["python", "-m", "s2s"]

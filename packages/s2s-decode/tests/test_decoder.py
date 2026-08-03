@@ -154,3 +154,118 @@ def test_session_buffer_exceeded():
     session = S2SSession(max_session_buffer_bytes=64)
     with pytest.raises(SessionBufferExceeded):
         list(session.feed(b"x" * 65))
+
+
+def test_stats_iadd_aggregates_all_counters():
+    from s2s.decoder import S2SStats
+    from dataclasses import fields
+
+    a = S2SStats(
+        handshake_seen=1,
+        frames_ok=2,
+        frames_bad_magic=3,
+        frames_bad_kv=4,
+        frames_oversized=5,
+        events_emitted=6,
+        bytes_consumed=7,
+        capabilities_replied=8,
+        protocol_version=0,
+    )
+    b = S2SStats(
+        handshake_seen=10,
+        frames_ok=20,
+        frames_bad_magic=30,
+        frames_bad_kv=40,
+        frames_oversized=50,
+        events_emitted=60,
+        bytes_consumed=70,
+        capabilities_replied=80,
+        protocol_version=3,
+    )
+    expected = {f.name: getattr(a, f.name) + getattr(b, f.name) for f in fields(a)}
+    expected["protocol_version"] = 3
+    a += b
+    for f in fields(a):
+        assert getattr(a, f.name) == expected[f.name], f.name
+
+
+def test_try_read_oversized_skips_available_buffer():
+    import struct
+
+    from s2s.message import try_read_message
+
+    # Claim 1 MiB body but only buffer a short prefix.
+    claimed = 1024 * 1024
+    buf = struct.pack(">I", claimed) + b"\xff" * 20
+    msg, consumed, err = try_read_message(buf, max_size=100)
+    assert msg is None
+    assert err is not None and "oversized" in err
+    assert consumed == len(buf)
+
+
+def test_try_read_undersized_skips_header():
+    import struct
+
+    from s2s.message import try_read_message
+
+    buf = struct.pack(">I", 2) + b"\x00\x00"
+    msg, consumed, err = try_read_message(buf)
+    assert msg is None
+    assert err is not None and "undersized" in err
+    assert consumed == 4
+
+
+def test_try_read_bad_kv_skips_full_frame():
+    import struct
+
+    from s2s.message import try_read_message
+
+    # Valid size/maps framing but truncated KV body.
+    body = struct.pack(">I", 1) + b"\x00" * 8  # maps=1, garbage
+    frame = struct.pack(">I", len(body)) + body
+    msg, consumed, err = try_read_message(frame)
+    assert msg is None
+    assert err is not None and err.startswith("kv:")
+    assert consumed == len(frame)
+
+
+def test_oversized_resync_is_linear():
+    """Adversarial oversized headers must not require one iteration per byte."""
+    import struct
+
+    from s2s.message import try_read_message
+
+    claimed = 50 * 1024 * 1024
+    header = struct.pack(">I", claimed)
+    buf = header * 1000  # ~4 KiB of repeated oversized headers
+    remaining = memoryview(buf)
+    iterations = 0
+    while remaining:
+        iterations += 1
+        assert iterations <= len(buf)  # hard ceiling; expect far fewer
+        _, consumed, err = try_read_message(remaining, max_size=100)
+        assert err is not None and "oversized" in err
+        assert consumed > 1
+        remaining = remaining[consumed:]
+    # Each pass should skip the whole remaining buffer (min(4+size, len)).
+    assert iterations == 1
+
+
+def test_build_cap_response_sanitizes_pl_injection():
+    from s2s.message import build_cap_response
+
+    # Malicious client tries to inject extra cap keys via pl / semicolon.
+    out = build_cap_response("pl=0;cap_response=hijacked;v4=1")
+    assert "cap_response=hijacked" not in out
+    assert out.count("cap_response=") == 1
+    assert "pl=0" in out
+    assert "v4=true" in out
+
+
+def test_build_cap_response_rejects_non_numeric_pl():
+    from s2s.message import build_cap_response
+
+    out = build_cap_response("pl=abc;evil=1")
+    assert "pl=0" in out
+    assert "evil" not in out
+    assert "abc" not in out

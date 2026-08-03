@@ -238,21 +238,7 @@ async def handle_s2s_client(
     except Exception as exc:
         logger.exception("client handler error from %s: %s", peer, exc)
     finally:
-        for name in (
-            "handshake_seen",
-            "frames_ok",
-            "frames_bad_magic",
-            "frames_bad_kv",
-            "frames_oversized",
-            "events_emitted",
-            "bytes_consumed",
-            "capabilities_replied",
-        ):
-            setattr(
-                stats,
-                name,
-                getattr(stats, name) + getattr(session.stats, name),
-            )
+        stats += session.stats
         writer.close()
         try:
             await writer.wait_closed()
