@@ -5,6 +5,12 @@
 #   classify  requests 100m/256Mi  limits 1/512Mi
 #   s2s       requests 200m/256Mi  limits 2/1Gi
 #   logstash  requests 500m/1536Mi limits 4/2Gi  (pipeline.workers matches limit)
+#
+# Compute-optimize Phase 2 vertical probe (do not enable without S1 ramp):
+#   B: limits cpu 6 / memory 3Gi, workers 6, lsJavaOpts -Xms1536m -Xmx1536m
+#   C: limits cpu 8 / memory 4Gi, workers 8, lsJavaOpts -Xms1536m -Xmx1536m
+# Keep planning floor at 0.008 GB/s/stack until a variant wins (see
+# docs/runbooks/compute-optimize.md).
 
 nameOverride: ""
 fullnameOverride: ""

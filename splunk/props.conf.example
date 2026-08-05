@@ -1,0 +1,11 @@
+# Prefer these so Splash stays on the metadata-local classify path (compute Phase 1).
+# Empty sourcetype/source forces /classify/batch (expensive cold path).
+
+# Example: ensure sourcetype is set at index time for common access logs.
+# [source::.../nginx/access.log]
+# sourcetype = access_combined
+#
+# [source::.../var/log/syslog]
+# sourcetype = syslog
+#
+# Keep sourcetype/source on cooked S2S fields — do not strip before tcpout.

@@ -37,3 +37,7 @@ groups:
             /
             clamp_min(splash:ingest_eps:1m, 1e-9)
           )
+
+      # 1 - miss_fraction; useful for compute-optimize Phase 1 target (>0.9).
+      - record: splash:hit_fraction:1m
+        expr: clamp_min(1 - splash:miss_fraction:1m, 0)

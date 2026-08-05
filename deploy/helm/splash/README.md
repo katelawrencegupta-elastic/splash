@@ -45,6 +45,8 @@ CPU requests/limits (defaults):
 
 `pipeline.workers` defaults to **4** (matches Logstash CPU limit).
 Pods use `terminationGracePeriodSeconds: 40` (covers s2s 30s drain).
+Planning floor **0.008 GB/s/stack** until a Phase 2 vertical probe wins
+([compute-optimize.md](../../../docs/runbooks/compute-optimize.md)).
 
 ## HA / security notes
 

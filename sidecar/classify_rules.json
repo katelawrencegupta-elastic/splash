@@ -1,7 +1,7 @@
 {
-  "access_sourcetype": "(access|apache|nginx|iis|httpd|lb)",
-  "syslog_sourcetype": "syslog",
-  "access_source": "(/var/log/(nginx|apache2?|httpd)|access\\.log)",
-  "syslog_source": "/var/log/syslog",
+  "access_sourcetype": "(access|apache|nginx|iis|httpd|lb|haproxy|traefik|caddy|squid|tomcat|weblogic|aws[:_]elb)",
+  "syslog_sourcetype": "(syslog|linux_messages_syslog|cisco:asa|cisco:ios)",
+  "access_source": "(/var/log/(nginx|apache2?|httpd|haproxy|traefik|caddy)|access[_.]?log)",
+  "syslog_source": "(/var/log/(syslog|messages|secure|auth\\.log))",
   "pipeline_name_template": "frosty-parse-{kind}"
 }

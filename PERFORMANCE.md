@@ -81,15 +81,24 @@ Splunk cooked tcpout :39998
 
 Idle re-inject of message-path egress can wait up to ~1s. Sub-second interval is optional if latency matters.
 
-### Low: S2S decoder copies whole buffer per frame
-
-**File:** `packages/s2s-decode/s2s/decoder.py` — hot path uses `memoryview(self._buf)` (no full-buffer copy).
-
 ### Low: Message-path still hits sidecar
 
-Empty sourcetype/source events still use `/classify/batch` (intentional).
+Empty sourcetype/source events still use `/classify/batch` (intentional). Reduce via rules + Splunk props ([compute-optimize.md](docs/runbooks/compute-optimize.md) Phase 1).
 
 ---
+
+## Compute baseline (Phase 0 — locked)
+
+| Item | Value |
+|------|-------|
+| Hot S1 sustained | **~0.0087 GB/s** (~5k eps @ ~1.5 KB) |
+| Planning floor | **0.008 GB/s / stack** |
+| Saturator | **Logstash** (queue peg ⇒ LS/ES behind) |
+| Per-stack shape | LS **4 CPU / workers 4**, s2s **2 CPU** |
+| Scale path | Horizontal shards; vertical LS probe before raising floor |
+
+Playbook: [`docs/runbooks/compute-optimize.md`](docs/runbooks/compute-optimize.md).  
+Baseline capture: `./scripts/compute-optimize-baseline.sh`.
 
 ## Priority Summary
 
@@ -98,12 +107,16 @@ Empty sourcetype/source events still use `/classify/batch` (intentional).
 | — | Hybrid metadata-local + ensure/batch | High | Fixed |
 | — | HTTP pool + workers=1 + async ES | Medium | Fixed |
 | — | Bounded buffers / coalesce waits / S2S upstream | High | Fixed |
-| 1 | Sub-second idle tick | Low | Open (heartbeat @ 1s; was exec) |
-| 2 | S2S decoder buffer copy | Low | Fixed (`memoryview`) |
+| 1 | Metadata hit rate (rules + Splunk fields) | High ($/GB) | Expanded rules + hit tags |
+| 2 | LS vertical probe 6/6 / 8/8 | Med | Documented; defaults stay 4/4 |
+| 3 | Sub-second idle tick | Low | Open (heartbeat @ 1s) |
+| 4 | s2s micro-opts | Low | Deferred (not saturator) |
 
 ## Recommended next steps
 
-1. Optionally lower heartbeat `interval` below 1s if idle message-path latency matters
+1. Keep miss_fraction &lt; 0.1 on soaks (`splash:hit_fraction:1m`); use `splunk/props.conf.example`.
+2. Run Phase 2 LS vertical matrix before changing Helm CPU/workers.
+3. Optionally lower heartbeat `interval` below 1s if idle message-path latency matters.
 
 ## Smoke checklist
 

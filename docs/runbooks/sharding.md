@@ -9,6 +9,8 @@ Load tests (hot cooked path, ~1.5 KB events):
 | 1 pipeline stack | **~0.008–0.009 GB/s** (~5k eps) |
 | N stacks | **~N × 0.008–0.009 GB/s** |
 
+**Locked planning floor:** **0.008 GB/s per stack** (Helm shape LS 4 CPU / workers 4 + s2s 2 CPU). Vertical Logstash probes (6/6, 8/8) must beat this on an S1 ramp before changing the floor — see [compute-optimize.md](compute-optimize.md).
+
 Planning formula (25% headroom):
 
 ```text

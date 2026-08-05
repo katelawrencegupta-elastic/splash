@@ -209,9 +209,11 @@ pip install -r requirements.txt
 python -m loadtest run -s S1 --eps 1000 --duration 30 --steady-only
 ```
 
-Keep `sidecar/classify_rules.json` and `packages/logstash-pipeline/scripts/classify_rules.json` in sync (compose overlays the sidecar file at runtime; a unit test asserts the copies match).
+Keep `sidecar/classify_rules.json` and `packages/logstash-pipeline/scripts/classify_rules.json` in sync (compose overlays the sidecar file at runtime; a unit test asserts the copies match). Prefer populated Splunk `sourcetype`/`source` ([`splunk/props.conf.example`](splunk/props.conf.example)) so classify stays on the metadata-local path.
 
 ## Docs
 
 - [`PERFORMANCE.md`](PERFORMANCE.md) — data-flow, tuning, open bottlenecks
 - [`docs/contracts/s2s-ndjson.md`](docs/contracts/s2s-ndjson.md) — s2s-decode → Logstash NDJSON contract
+- [`docs/runbooks/compute-optimize.md`](docs/runbooks/compute-optimize.md) — GB/s-per-dollar playbook
+- [`docs/runbooks/sharding.md`](docs/runbooks/sharding.md) — shard formula + VIP

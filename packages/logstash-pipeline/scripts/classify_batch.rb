@@ -149,10 +149,20 @@ def filter(event)
   local = classify_from_metadata(event)
   if local
     apply_local_hit!(event, local)
+    tags = event.get("tags")
+    tags = [] unless tags.is_a?(Array)
+    tags << "_classify_metadata_hit" unless tags.include?("_classify_metadata_hit")
+    event.set("tags", tags)
     out = [event]
     out.concat(drain_egress)
     return out
   end
+
+  # Miss path: message-path batch to classify sidecar.
+  tags = event.get("tags")
+  tags = [] unless tags.is_a?(Array)
+  tags << "_classify_metadata_miss" unless tags.include?("_classify_metadata_miss")
+  event.set("tags", tags)
 
   batch = nil
   accepted = false
